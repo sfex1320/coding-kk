@@ -1,0 +1,169 @@
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+
+// 把成品文件组织到 APP/ 文件夹：
+//   APP/电脑端监控/CodeStatus-Monitor.exe   双击即运行（内嵌 Node + 网页，免安装）
+//   APP/安卓App/CodeStatus.apk              安卓安装包
+//   APP/鸿蒙App/                            鸿蒙工程（需 DevEco 构建 .hap）
+//
+// 用法：node scripts/package-apps.mjs
+//   - 默认会调用 build-desktop-exe.mjs 重新构建 exe；加 --skip-exe 跳过（复用已构建的 exe）。
+const root = process.cwd();
+const appDir = path.join(root, "APP");
+const desktopDir = path.join(appDir, "电脑端监控");
+const androidDir = path.join(appDir, "安卓App");
+const harmonyDir = path.join(appDir, "鸿蒙App");
+const skipExe = process.argv.includes("--skip-exe");
+const CR = "\r\n";
+
+fs.mkdirSync(appDir, { recursive: true });
+
+// ---------------- 电脑端监控（单文件 exe）----------------
+if (!skipExe) {
+  console.log("== 构建电脑端 exe ==");
+  run(process.execPath, [path.join(root, "scripts", "build-desktop-exe.mjs")]);
+}
+fs.mkdirSync(desktopDir, { recursive: true });
+
+// 附带：VS Code 扩展 + hooks 安装脚本（接入各 Coding 工具用）
+copyDir(path.join(root, "extensions"), path.join(desktopDir, "extensions"));
+copyDir(path.join(root, "scripts", "install-claude-code-hooks.mjs"), path.join(desktopDir, "scripts", "install-claude-code-hooks.mjs"));
+copyDir(path.join(root, "scripts", "install-codex-hooks.mjs"), path.join(desktopDir, "scripts", "install-codex-hooks.mjs"));
+copyDir(path.join(root, "adapters"), path.join(desktopDir, "adapters"));
+
+writeFile(path.join(desktopDir, "安装VSCode扩展.cmd"), [
+  "@echo off",
+  "chcp 65001 >nul",
+  "set DEST=%USERPROFILE%\\.vscode\\extensions\\codestatus-companion-0.1.0",
+  'echo 安装 VS Code 扩展到 %DEST%',
+  'if exist "%DEST%" rmdir /s /q "%DEST%"',
+  'xcopy /e /i /y "%~dp0extensions\\vscode" "%DEST%" >nul',
+  "echo 完成。请重启 VS Code / Cursor。Cursor 用户把上面的 .vscode 改成 .cursor。",
+  "pause"
+].join(CR));
+writeFile(path.join(desktopDir, "安装ClaudeCode监控.cmd"), [
+  "@echo off",
+  "chcp 65001 >nul",
+  "cd /d %~dp0",
+  "node scripts/install-claude-code-hooks.mjs",
+  "pause"
+].join(CR));
+writeFile(path.join(desktopDir, "安装Codex监控.cmd"), [
+  "@echo off",
+  "chcp 65001 >nul",
+  "cd /d %~dp0",
+  "node scripts/install-codex-hooks.mjs",
+  "echo 还需在 Codex 里 /hooks 信任 CodeStatus hook。",
+  "pause"
+].join(CR));
+// 一键放行 Windows 防火墙（手机连不上多半是这个）。自动以管理员身份重启。
+writeFile(path.join(desktopDir, "允许防火墙.cmd"), [
+  "@echo off",
+  "chcp 65001 >nul",
+  "net session >nul 2>&1",
+  "if %errorlevel% neq 0 (",
+  "  echo 需要管理员权限，正在重新以管理员身份运行...",
+  "  powershell -Command \"Start-Process '%~f0' -Verb RunAs\"",
+  "  exit /b",
+  ")",
+  "echo 正在放行 CodeStatus 端口 4317 / 5173 / 4318 ...",
+  "netsh advfirewall firewall delete rule name=\"CodeStatus\" >nul 2>&1",
+  "netsh advfirewall firewall add rule name=\"CodeStatus\" dir=in action=allow protocol=TCP localport=4317,5173,4318",
+  "echo 完成。现在手机应能连上电脑端了。",
+  "pause"
+].join(CR));
+
+// ---------------- 安卓 ----------------
+resetDir(androidDir);
+const apk = findApk();
+if (apk) {
+  fs.copyFileSync(apk, path.join(androidDir, "CodeStatus.apk"));
+  console.log(`== 已放入 APK: ${apk}`);
+} else {
+  console.log("== 未找到已构建的 APK（先运行安卓构建）");
+}
+writeFile(path.join(androidDir, "安装说明.txt"), [
+  "CodeStatus 安卓手机端",
+  "",
+  "把 CodeStatus.apk 传到安卓手机安装（需允许“未知来源”应用）。",
+  "打开 App → 扫码连接 → 对准电脑端页面「局域网配对」二维码即可。",
+  "手机需与电脑同一 Wi-Fi。"
+].join(CR), "utf8");
+
+// ---------------- 鸿蒙 ----------------
+resetDir(harmonyDir);
+copyDir(path.join(root, "apps", "harmony"), path.join(harmonyDir, "鸿蒙工程"));
+copyIfExists(path.join(root, "apps", "harmony", "README.md"), path.join(harmonyDir, "构建说明.md"));
+
+// ---------------- 顶层说明 ----------------
+writeFile(path.join(appDir, "使用说明.md"), [
+  "# CodeStatus 成品包",
+  "",
+  "| 平台 | 文件 | 用法 |",
+  "| --- | --- | --- |",
+  "| 电脑 | `电脑端监控/CodeStatus-Monitor.exe` | 双击运行（免装 Node，自动开浏览器）|",
+  "| 安卓 | `安卓App/CodeStatus.apk` | 传到手机安装 |",
+  "| 鸿蒙 | `鸿蒙App/鸿蒙工程/` | 需 DevEco Studio 构建 .hap（本机无法直接产出）|",
+  "",
+  "## 连接（很快）",
+  "1. 电脑双击 exe，页面「局域网配对」显示二维码。",
+  "2. 手机装好 App → 「扫码连接」→ 对准二维码，几秒连上。",
+  "3. 鸿蒙手机也可直接用浏览器扫码打开副屏（零安装）。",
+  "",
+  "## 接入被监控的 Coding 工具（电脑端）",
+  "- VS Code / Cursor / Kimi Code / MiniMax Code / GLM Code：双击 `电脑端监控/安装VSCode扩展.cmd`。",
+  "- Claude Code / Codex：双击对应 `安装*.cmd`（需本机已装 Node）。"
+].join("\n"));
+
+console.log("\n完成。APP/ 目录已就绪。");
+
+function findApk() {
+  const candidates = [
+    path.join(root, "apps", "mobile", "android", "app", "build", "outputs", "apk", "release"),
+    path.join(root, "apps", "mobile", "android", "app", "build", "outputs", "apk", "debug"),
+    path.join(root, "apps", "mobile", "dist")
+  ];
+  for (const dir of candidates) {
+    if (!fs.existsSync(dir)) continue;
+    const apk = fs.readdirSync(dir).find((n) => n.toLowerCase().endsWith(".apk"));
+    if (apk) return path.join(dir, apk);
+  }
+  return null;
+}
+
+function run(file, args) {
+  if (process.platform === "win32" && file.endsWith(".cmd")) {
+    execFileSync("cmd.exe", ["/c", file, ...args], { cwd: root, stdio: "inherit", windowsHide: true });
+    return;
+  }
+  execFileSync(file, args, { cwd: root, stdio: "inherit", windowsHide: true });
+}
+
+function resetDir(dir) {
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+}
+
+function copyDir(from, to) {
+  fs.mkdirSync(path.dirname(to), { recursive: true });
+  fs.cpSync(from, to, {
+    recursive: true,
+    filter: (source) => {
+      const n = source.replaceAll("\\", "/");
+      return !n.includes("/node_modules/") && !n.includes("/.expo/") && !n.includes("/android/build/") && !n.includes("/.git/");
+    }
+  });
+}
+
+function copyIfExists(from, to) {
+  if (fs.existsSync(from)) {
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    fs.copyFileSync(from, to);
+  }
+}
+
+function writeFile(filePath, value, encoding = "utf8") {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, value, encoding);
+}

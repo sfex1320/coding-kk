@@ -1,0 +1,14 @@
+{
+  "name": "CodeStatus 状态屏",
+  "short_name": "CodeStatus",
+  "description": "跨 Coding 工具状态监控 · 手机副屏",
+  "start_url": "./?display=1",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#000000",
+  "theme_color": "#ff7a1a",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

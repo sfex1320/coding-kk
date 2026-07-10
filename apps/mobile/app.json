@@ -1,0 +1,40 @@
+{
+  "expo": {
+    "name": "CodeStatus",
+    "slug": "codestatus-mobile",
+    "version": "0.1.0",
+    "orientation": "landscape",
+    "userInterfaceStyle": "automatic",
+    "scheme": "codestatus",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "plugins": [
+      [
+        "expo-camera",
+        { "cameraPermission": "CodeStatus 需要使用摄像头扫描电脑端二维码以快速连接。" }
+      ]
+    ],
+    "android": {
+      "package": "com.codestatus.mobile",
+      "versionCode": 1,
+      "usesCleartextTraffic": true,
+      "permissions": [
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
+        "RECORD_AUDIO",
+        "WAKE_LOCK",
+        "FOREGROUND_SERVICE",
+        "CAMERA"
+      ]
+    },
+    "ios": {
+      "bundleIdentifier": "com.codestatus.mobile",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "CodeStatus uses the microphone for wake word and voice status queries.",
+        "NSLocalNetworkUsageDescription": "CodeStatus connects to the desktop client on your local network."
+      }
+    }
+  }
+}

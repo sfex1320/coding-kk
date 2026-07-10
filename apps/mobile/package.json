@@ -1,0 +1,21 @@
+{
+  "name": "codestatus-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "prebuild:android": "expo prebuild --platform android",
+    "build:android:apk": "eas build --platform android --profile apk"
+  },
+  "dependencies": {
+    "@react-native-async-storage/async-storage": "^2.1.0",
+    "expo": "^54.0.0",
+    "expo-camera": "~17.0.0",
+    "expo-speech": "^14.0.0",
+    "react": "^19.0.0",
+    "react-native": "^0.81.0"
+  }
+}

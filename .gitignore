@@ -1,0 +1,21 @@
+# 依赖与构建产物
+.android-build/
+node_modules/
+dist/
+build/
+.gradle/
+APP/
+
+# 本地运行时数据（含配对密钥、推送 key、自签证书，绝不上传）
+data/
+*.log
+
+# 安卓本地配置与签名
+local.properties
+*.jks
+*.keystore
+
+# 临时文件
+*.tmp
+.DS_Store
+Thumbs.db

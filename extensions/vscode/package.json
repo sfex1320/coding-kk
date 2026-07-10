@@ -1,0 +1,42 @@
+{
+  "name": "codestatus-vscode",
+  "displayName": "CodeStatus Companion",
+  "description": "Report VS Code and Cursor coding status to CodeStatus Agent.",
+  "version": "0.1.0",
+  "publisher": "codestatus",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "CodeStatus Companion",
+      "properties": {
+        "codestatus.agentUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:4317/api/events",
+          "description": "CodeStatus Agent event endpoint."
+        },
+        "codestatus.agents": {
+          "type": "array",
+          "default": [],
+          "markdownDescription": "在 VS Code 里运行的 AI 编码工具注册表（留空使用内置：Claude Dev / Kimi Code / MiniMax Code / GLM Code）。新增工具时按此格式追加一条，即可被监控，无需改代码。",
+          "items": {
+            "type": "object",
+            "required": ["source", "label"],
+            "properties": {
+              "source": { "type": "string", "description": "唯一来源 id，如 glm-code" },
+              "label": { "type": "string", "description": "显示名称，如 GLM Code" },
+              "extensionIds": { "type": "array", "items": { "type": "string" }, "description": "对应 VS Code 扩展 id 或关键字" },
+              "commandPatterns": { "type": "array", "items": { "type": "string" }, "description": "终端命令正则（如 \\\\bglm\\\\b）" },
+              "terminalPatterns": { "type": "array", "items": { "type": "string" }, "description": "终端名称正则" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

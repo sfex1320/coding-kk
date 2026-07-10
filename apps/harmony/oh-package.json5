@@ -1,0 +1,7 @@
+{
+  "name": "codestatus-harmony",
+  "version": "0.1.0",
+  "description": "CodeStatus HarmonyOS client (WebView + Scan Kit)",
+  "main": "",
+  "dependencies": {}
+}
