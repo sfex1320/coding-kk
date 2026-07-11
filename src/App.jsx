@@ -980,11 +980,14 @@ function StageStatusPanel({ tool, status }) {
 }
 
 const notifyStateOptions = [
+  { value: "prompt_submitted", label: "任务开始" },
   { value: "completed", label: "任务完成" },
   { value: "failed", label: "出现问题" },
   { value: "waiting_permission", label: "等待授权" },
   { value: "waiting_user", label: "等待输入" }
 ];
+
+const graceSecondsOptions = [0, 5, 10, 20, 30, 60];
 
 // 消息推送设置（仅电脑端可用：/api/settings 只允许本机访问，手机端拿不到就不渲染）
 function NotificationPanel({ agentBase, apiHeaders }) {
@@ -1084,6 +1087,23 @@ function NotificationPanel({ agentBase, apiHeaders }) {
           ))}
         </div>
       </div>
+      <div className="speech-row">
+        <span>完成确认延时</span>
+        <div className="chip-group">
+          {graceSecondsOptions.map((sec) => (
+            <button
+              key={sec}
+              className={Number(notify.completedGraceSeconds ?? 10) === sec ? "chip active" : "chip"}
+              onClick={() => patch({ completedGraceSeconds: sec })}
+            >
+              {sec === 0 ? "即时" : `${sec}秒`}
+            </button>
+          ))}
+        </div>
+      </div>
+      <p className="notify-hint">
+        任务结束后静默这么久没有新动作，才判定为「整体完成」并播报 / 推送——避免子任务、单轮结束时误报「已完成」。选「即时」恢复旧行为；改完记得点下方「保存设置」。
+      </p>
 
       <div className="notify-channel">
         <div className="speech-row">

@@ -591,12 +591,59 @@ function createPairingCode() {
   return code;
 }
 
+// 「完成」需要静默确认：真正结束前，子轮 / 子代理会不断触发 end_turn / SubagentStop，
+// 直接播报会“早鸣”。收到 completed 后先静默一小段时间，其间只要有新活动就撤销，
+// 只有确实安静下来才判定为整体完成——避免“一个小轮结束就播报已完成，但整体还在跑”。
+const pendingCompletions = new Map(); // instanceId -> { event, timer }
+
+function completedSettleMs() {
+  const raw = Number(store.settings?.notify?.completedGraceSeconds);
+  const seconds = Number.isFinite(raw) ? raw : 10;
+  return Math.min(120, Math.max(0, seconds)) * 1000;
+}
+
 function ingest(input) {
   const event = normalizeEvent(input);
-  const prevState = store.tools[event.instanceId]?.state;
-  store.tools[event.instanceId] = {
-    ...(store.tools[event.instanceId] || {
-      instanceId: event.instanceId,
+  const instanceId = event.instanceId;
+  const pending = pendingCompletions.get(instanceId);
+
+  if (event.state === "completed") {
+    // 收到完成：暂缓提交，进入静默确认期（连续多个 end_turn 只保留最后一个）
+    if (pending) clearTimeout(pending.timer);
+    const settleMs = completedSettleMs();
+    if (settleMs <= 0) {
+      pendingCompletions.delete(instanceId);
+      return commit(event);
+    }
+    const record = { event, timer: null };
+    record.timer = setTimeout(() => {
+      pendingCompletions.delete(instanceId);
+      commit(record.event);
+    }, settleMs);
+    pendingCompletions.set(instanceId, record);
+    return event; // 静默期确认后再广播 / 推送
+  }
+
+  if (pending) {
+    clearTimeout(pending.timer);
+    pendingCompletions.delete(instanceId);
+    // 明确空闲 / 离线：确认之前那次完成后再处理本事件；
+    // 其它状态说明任务其实还在跑，直接丢弃这次“完成”。
+    if (event.state === "idle" || event.state === "offline") {
+      commit(pending.event);
+    }
+  }
+
+  return commit(event);
+}
+
+// 真正落库 + 广播 + 推送（前态从 store 现值读取，即“本事件之前的状态”）
+function commit(event) {
+  const instanceId = event.instanceId;
+  const prevState = store.tools[instanceId]?.state;
+  store.tools[instanceId] = {
+    ...(store.tools[instanceId] || {
+      instanceId,
       source: event.source
     }),
     sourceLabel: event.sourceLabel,
@@ -768,8 +815,10 @@ function mapHookToState(hookEvent, toolName, command, raw) {
   }
   if (event === "permissionrequest") return "waiting_permission";
   if (event === "posttoolusefailure" || event === "stopfailure" || event === "permissiondenied") return "failed";
-  if (event === "stop" || event === "taskcompleted" || event === "subagentstop") return "completed";
-  if (event === "subagentstart" || event === "taskcreated") return "thinking";
+  if (event === "stop" || event === "taskcompleted") return "completed";
+  // 子代理开始/结束都属于「整体任务进行中」：SubagentStop 只是一个小轮结束，
+  // 主代理随后会继续，不能当成整体完成，否则会过早播报“已完成”。
+  if (event === "subagentstart" || event === "subagentstop" || event === "taskcreated") return "thinking";
 
   if (event === "posttoolbatch" && Array.isArray(raw?.tool_calls)) {
     const calls = raw.tool_calls.map((call) => ({
@@ -989,7 +1038,17 @@ function loadSettings() {
     }
     const settings = { ...defaults, ...JSON.parse(fs.readFileSync(DATA_FILE, "utf8")) };
     settings.notify = mergeNotifySettings(settings.notify);
-    if (!settings.agentId || !settings.agentName) {
+    let dirty = false;
+    // 一次性迁移：为老配置补上「任务开始」推送（这是新增的推送类型，用户此前无从勾选）。
+    // 迁移后打标记，用户之后仍可自行取消，不会被反复加回。
+    if (!settings.notifyTaskStartMigrated) {
+      if (Array.isArray(settings.notify.states) && !settings.notify.states.includes("prompt_submitted")) {
+        settings.notify.states = ["prompt_submitted", ...settings.notify.states];
+      }
+      settings.notifyTaskStartMigrated = true;
+      dirty = true;
+    }
+    if (!settings.agentId || !settings.agentName || dirty) {
       fs.writeFileSync(DATA_FILE, JSON.stringify(settings, null, 2), "utf8");
     }
     return settings;

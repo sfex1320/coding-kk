@@ -4,10 +4,12 @@ import tls from "node:tls";
 // 推送设置默认值（settings.notify）
 export const DEFAULT_NOTIFY_SETTINGS = {
   enabled: true,
-  // 哪些状态变化时推送
-  states: ["completed", "failed", "waiting_permission", "waiting_user"],
+  // 哪些状态变化时推送（prompt_submitted = 任务开始）
+  states: ["prompt_submitted", "completed", "failed", "waiting_permission", "waiting_user"],
   // 同一实例同一状态的最小推送间隔，防止刷屏
   cooldownSeconds: 60,
+  // 判定“整体完成”前的静默确认时长（秒）：期间有新活动就不算完成，避免子轮结束误报。0 = 立即
+  completedGraceSeconds: 10,
   serverchan: { enabled: false, sendKey: "" },
   pushplus: { enabled: false, token: "" },
   email: { enabled: false, host: "smtp.qq.com", port: 465, user: "", pass: "", to: "" }
@@ -28,6 +30,7 @@ export function mergeNotifySettings(base = {}, incoming = {}) {
 }
 
 const stateLabels = {
+  prompt_submitted: "任务开始",
   completed: "任务完成",
   failed: "出现问题",
   waiting_permission: "等待授权",
