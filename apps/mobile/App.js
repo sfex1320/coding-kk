@@ -176,7 +176,7 @@ export default function App() {
 
   activeToolRef.current = activeTool;
 
-  // 语音播报新事件：每次状态切换都播报，按「状态+事件ID」去重防重复推送
+  // 语音播报：同一状态只报一次，状态变化才再报
   useEffect(() => {
     if (!speechEnabled) return;
     const event = status?.recentEvents?.[0];
@@ -184,9 +184,8 @@ export default function App() {
     // 空闲/离线/暂停不播报
     if (event.state === "idle" || event.state === "offline" || event.state === "paused") return;
     const instance = event.instanceId || event.source || "task";
-    const dedupKey = `${event.state}::${event.eventId}`;
-    if (lastSpokenByInstance.current.get(instance) === dedupKey) return;
-    lastSpokenByInstance.current.set(instance, dedupKey);
+    if (lastSpokenByInstance.current.get(instance) === event.state) return;
+    lastSpokenByInstance.current.set(instance, event.state);
     Speech.speak(briefSpeech(event), { language: "zh-CN" });
   }, [status, speechEnabled]);
 

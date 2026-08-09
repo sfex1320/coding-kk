@@ -51,8 +51,30 @@ const stateMeta = {
   paused: { label: "已暂停", tone: "neutral", icon: PauseCircle, pet: "idle" }
 };
 
-// 不播报的状态：空闲/离线/暂停不说话，只在有实际活动（工作/完成/失败/等待）时才报。
-const SILENT_STATES = new Set(["idle", "offline", "paused"]);
+// 可配置的播报状态：用户可在面板勾选哪些状态需要播报。
+// 默认只播报关键节点：开始思考、完成、失败、等待授权。写代码/运行命令等中间过程默认不报。
+const ANNOUNCEABLE_STATES = [
+  { key: "thinking", label: "开始思考", default: true },
+  { key: "prompt_submitted", label: "已提交任务", default: true },
+  { key: "writing_code", label: "正在写代码", default: false },
+  { key: "using_tool", label: "调用工具", default: false },
+  { key: "running_command", label: "运行命令", default: false },
+  { key: "running_tests", label: "运行测试", default: false },
+  { key: "completed", label: "已完成", default: true },
+  { key: "failed", label: "出现问题", default: true },
+  { key: "waiting_permission", label: "等待授权", default: true },
+  { key: "waiting_user", label: "等待输入", default: true },
+  { key: "idle", label: "空闲", default: false },
+];
+
+function loadAnnounceStates() {
+  try {
+    const stored = window.localStorage.getItem("codestatus-announce-states");
+    if (stored) return new Set(JSON.parse(stored));
+  } catch {}
+  // 默认值
+  return new Set(ANNOUNCEABLE_STATES.filter((s) => s.default).map((s) => s.key));
+}
 
 const simulations = [
   { source: "claude-code", state: "thinking", message: "Claude Code 正在分析项目结构", title: "Claude Code 正在思考" },
@@ -108,6 +130,8 @@ export default function App() {
   );
   const activeToolRef = useRef(null);
   const lastSpokenByInstance = useRef(new Map());
+  const [announceStates, setAnnounceStates] = useState(() => loadAnnounceStates());
+  const announceStatesRef = useRef(announceStates);
   const speechQueue = useRef([]);
   const speaking = useRef(false);
   const speechRunId = useRef(0);
@@ -278,6 +302,10 @@ export default function App() {
     ttsCloudEnabledRef.current = ttsCloudEnabled;
   }, [ttsCloudEnabled]);
 
+  useEffect(() => {
+    announceStatesRef.current = announceStates;
+  }, [announceStates]);
+
   // 拉取电脑端可用的云端音色列表
   useEffect(() => {
     let active = true;
@@ -380,12 +408,12 @@ export default function App() {
     if (!speechEnabled || !status?.recentEvents?.length || !window.speechSynthesis) return;
     const event = status.recentEvents[0];
     if (!event?.eventId) return;
-    if (SILENT_STATES.has(event.state)) return; // 离线不播报
-    // 每次状态切换都播报：按「状态+事件ID」去重，同一事件的重复推送不重报，状态变化即报。
+    // 只播报用户勾选的状态
+    if (!announceStatesRef.current.has(event.state)) return;
+    // 同一实例同一状态只播报一次：状态不变不重报（避免「正在写代码」反复播报）
     const instance = event.instanceId || event.source || "task";
-    const dedupKey = `${event.state}::${event.eventId}`;
-    if (lastSpokenByInstance.current.get(instance) === dedupKey) return;
-    lastSpokenByInstance.current.set(instance, dedupKey);
+    if (lastSpokenByInstance.current.get(instance) === event.state) return;
+    lastSpokenByInstance.current.set(instance, event.state);
     enqueueSpeak({ text: announcementForEvent(event), source: event.source });
   }, [status, speechEnabled]);
 
@@ -484,6 +512,16 @@ export default function App() {
   function changeRate(rate) {
     setTtsRate(rate);
     window.localStorage.setItem("codestatus-tts-rate", String(rate));
+  }
+
+  function toggleAnnounceState(stateKey) {
+    setAnnounceStates((prev) => {
+      const next = new Set(prev);
+      if (next.has(stateKey)) next.delete(stateKey);
+      else next.add(stateKey);
+      window.localStorage.setItem("codestatus-announce-states", JSON.stringify([...next]));
+      return next;
+    });
   }
 
   function enqueueSpeak(input) {
@@ -798,6 +836,20 @@ export default function App() {
                   onClick={() => changeRate(option.value)}
                 >
                   {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="speech-row" style={{ flexDirection: "column", alignItems: "flex-start", gap: 8 }}>
+            <span>播报状态（同一状态只报一次，状态变化才再报）</span>
+            <div className="chip-group" style={{ flexWrap: "wrap" }}>
+              {ANNOUNCEABLE_STATES.map((s) => (
+                <button
+                  key={s.key}
+                  className={announceStates.has(s.key) ? "chip active" : "chip"}
+                  onClick={() => toggleAnnounceState(s.key)}
+                >
+                  {s.label}
                 </button>
               ))}
             </div>

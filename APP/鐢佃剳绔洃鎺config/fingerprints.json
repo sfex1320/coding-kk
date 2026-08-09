@@ -1,0 +1,262 @@
+{
+  "_说明": "CodeStatus 通用监控指纹库。要加新的 AI 工具，在 fingerprints 数组里照格式加一条即可，无需改代码。enabled=false 可临时关掉某个工具。改完重启「启动AI工具监控」生效。",
+  "agentUrl": "http://127.0.0.1:4317/api/events",
+  "fallbackUrl": "http://127.0.0.1:4317/events",
+  "pollMs": {
+    "foreground": 1500,
+    "process": 2000,
+    "http": 5000
+  },
+  "cpu": {
+    "busyPct": 25,
+    "genPct": 12,
+    "idlePct": 5,
+    "busyCycles": 1,
+    "idleCycles": 2
+  },
+  "throttleMs": 1500,
+  "fingerprints": [
+    {
+      "source": "opencode-desktop",
+      "label": "OpenCode",
+      "type": "desktop",
+      "processNames": ["OpenCode.exe"],
+      "pathKeywords": ["@opencode-aidesktop", "opencode-aidesktop"],
+      "windowKeywords": ["OpenCode"],
+      "enhanced": "opencode",
+      "enabled": true
+    },
+    {
+      "source": "kimi-desktop",
+      "label": "Kimi 桌面版",
+      "type": "desktop",
+      "processNames": ["Kimi.exe"],
+      "pathKeywords": ["kimi-desktop"],
+      "windowKeywords": ["Kimi"],
+      "enabled": true
+    },
+    {
+      "source": "kimi-code",
+      "label": "Kimi CLI",
+      "type": "runtime",
+      "processNames": ["node.exe"],
+      "commandPatterns": ["kimi-code", "kimi-cli", "@moonshot-ai[\\\\/]kimi"],
+      "pathKeywords": ["@moonshot-ai", "kimi-code", "kimi-cli"],
+      "enabled": true
+    },
+    {
+      "source": "claude-code",
+      "label": "Claude Code",
+      "type": "runtime",
+      "processNames": ["node.exe"],
+      "commandPatterns": ["\\bclaude\\b", "@anthropic-ai[\\\\/]claude-code"],
+      "pathKeywords": ["@anthropic-ai", "claude-code"],
+      "enabled": true
+    },
+    {
+      "source": "codex",
+      "label": "Codex",
+      "type": "runtime",
+      "processNames": ["node.exe"],
+      "commandPatterns": ["\\bcodex\\b", "@openai[\\\\/]codex"],
+      "pathKeywords": ["@openai", "codex"],
+      "enabled": true
+    },
+    {
+      "source": "zcode",
+      "label": "ZCode",
+      "type": "desktop",
+      "processNames": ["ZCode.exe"],
+      "pathKeywords": ["zcode"],
+      "windowKeywords": ["ZCode", "Z Code"],
+      "enabled": true
+    },
+    {
+      "source": "autoglm",
+      "label": "AutoGLM",
+      "type": "desktop",
+      "processNames": ["AutoGLM.exe"],
+      "pathKeywords": ["autoglm"],
+      "windowKeywords": ["AutoGLM", "GLM"],
+      "enabled": true
+    },
+    {
+      "source": "pycharm",
+      "label": "PyCharm",
+      "type": "ide",
+      "processNames": ["pycharm64.exe"],
+      "pathKeywords": ["PyCharm"],
+      "windowKeywords": ["PyCharm"],
+      "enabled": true
+    },
+    {
+      "source": "webstorm",
+      "label": "WebStorm",
+      "type": "ide",
+      "processNames": ["webstorm64.exe"],
+      "pathKeywords": ["WebStorm"],
+      "windowKeywords": ["WebStorm"],
+      "enabled": true
+    },
+    {
+      "source": "intellij",
+      "label": "IntelliJ IDEA",
+      "type": "ide",
+      "processNames": ["idea64.exe"],
+      "pathKeywords": ["IntelliJ"],
+      "windowKeywords": ["IntelliJ"],
+      "enabled": true
+    },
+    {
+      "source": "goland",
+      "label": "GoLand",
+      "type": "ide",
+      "processNames": ["goland64.exe"],
+      "pathKeywords": ["GoLand"],
+      "windowKeywords": ["GoLand"],
+      "enabled": true
+    },
+    {
+      "source": "rustrover",
+      "label": "RustRover",
+      "type": "ide",
+      "processNames": ["rustrover64.exe"],
+      "pathKeywords": ["RustRover"],
+      "windowKeywords": ["RustRover"],
+      "enabled": true
+    },
+    {
+      "source": "clion",
+      "label": "CLion",
+      "type": "ide",
+      "processNames": ["clion64.exe"],
+      "pathKeywords": ["CLion"],
+      "windowKeywords": ["CLion"],
+      "enabled": true
+    },
+    {
+      "source": "phpstorm",
+      "label": "PhpStorm",
+      "type": "ide",
+      "processNames": ["phpstorm64.exe"],
+      "pathKeywords": ["PhpStorm"],
+      "windowKeywords": ["PhpStorm"],
+      "enabled": true
+    },
+    {
+      "source": "windsurf",
+      "label": "Windsurf",
+      "type": "ide",
+      "processNames": ["Windsurf.exe", "Codeium.exe"],
+      "pathKeywords": ["Windsurf"],
+      "windowKeywords": ["Windsurf"],
+      "enabled": true
+    },
+    {
+      "source": "trae",
+      "label": "Trae",
+      "type": "ide",
+      "processNames": ["Trae.exe"],
+      "pathKeywords": ["Trae"],
+      "windowKeywords": ["Trae"],
+      "enabled": true
+    },
+    {
+      "source": "zed",
+      "label": "Zed",
+      "type": "ide",
+      "processNames": ["zed.exe", "Zed.exe"],
+      "pathKeywords": ["Zed"],
+      "windowKeywords": ["Zed"],
+      "enabled": true
+    },
+    {
+      "source": "void",
+      "label": "Void",
+      "type": "ide",
+      "processNames": ["Void.exe"],
+      "pathKeywords": ["Void"],
+      "windowKeywords": ["Void"],
+      "enabled": true
+    },
+    {
+      "source": "pearai",
+      "label": "PearAI",
+      "type": "ide",
+      "processNames": ["PearAI.exe"],
+      "pathKeywords": ["PearAI", "pearai"],
+      "windowKeywords": ["PearAI", "Pear"],
+      "enabled": true
+    },
+    {
+      "source": "pieces",
+      "label": "Pieces",
+      "type": "desktop",
+      "processNames": ["pieces.exe", "pieces-os.exe"],
+      "pathKeywords": ["pieces"],
+      "windowKeywords": ["Pieces"],
+      "enabled": true
+    },
+    {
+      "source": "comfyui",
+      "label": "ComfyUI",
+      "type": "service",
+      "processNames": ["python.exe", "pythonw.exe"],
+      "commandPatterns": ["ComfyUI[\\\\/]main\\.py"],
+      "windowKeywords": ["ComfyUI"],
+      "httpProbe": {
+        "baseUrl": "http://127.0.0.1:8909",
+        "healthPath": "/system_stats",
+        "dataPath": "/queue",
+        "kind": "comfyui"
+      },
+      "enabled": true
+    },
+    {
+      "source": "ollama",
+      "label": "Ollama",
+      "type": "runtime",
+      "processNames": ["ollama.exe", "ollama app.exe", "ollama_runner.exe", "ollama runner.exe", "llama-server.exe"],
+      "pathKeywords": ["ollama"],
+      "httpProbe": {
+        "baseUrl": "http://127.0.0.1:11434",
+        "healthPath": "/",
+        "dataPath": "/api/ps",
+        "kind": "ollama"
+      },
+      "busyOnCpu": true,
+      "cpuBusyPct": 18,
+      "runnerKeywords": ["ollama runner", "ollama_runner", "llama-server"],
+      "enabled": true
+    },
+    {
+      "source": "lm-studio",
+      "label": "LM Studio",
+      "type": "runtime",
+      "processNames": ["LM Studio.exe"],
+      "pathKeywords": ["LM Studio", "lm-studio"],
+      "httpProbe": {
+        "baseUrl": "http://127.0.0.1:1234",
+        "healthPath": "/v1/models",
+        "dataPath": "/v1/models",
+        "kind": "generic"
+      },
+      "busyOnCpu": true,
+      "enabled": true
+    },
+    {
+      "source": "sd-webui",
+      "label": "SD WebUI",
+      "type": "service",
+      "processNames": ["python.exe", "pythonw.exe"],
+      "commandPatterns": ["webui\\.py", "launch\\.py"],
+      "httpProbe": {
+        "baseUrl": "http://127.0.0.1:7860",
+        "healthPath": "/sdapi/v1/options",
+        "dataPath": "/sdapi/v1/progress",
+        "kind": "sdwebui"
+      },
+      "enabled": true
+    }
+  ]
+}

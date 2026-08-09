@@ -4,7 +4,10 @@ node_modules/
 dist/
 build/
 .gradle/
-APP/
+
+# APP/ 打包成品目录（exe + 配置 + 脚本，上传到 GitHub 供直接下载）
+# 注意：APP/电脑端监控/data/ 仍被排除（含运行时密钥）
+APP/电脑端监控/data/
 
 # 本地运行时数据（含配对密钥、推送 key、自签证书，绝不上传）
 data/
