@@ -51,28 +51,8 @@ const stateMeta = {
   paused: { label: "已暂停", tone: "neutral", icon: PauseCircle, pet: "idle" }
 };
 
-// 播报分桶：开始/进行中/完成/失败/打断各报一次，同桶不重复；空闲/离线/暂停不报。
-function announceBucket(state) {
-  switch (state) {
-    case "prompt_submitted":
-    case "thinking":
-      return "start";
-    case "using_tool":
-    case "writing_code":
-    case "running_command":
-    case "running_tests":
-      return "progress";
-    case "completed":
-      return "completed";
-    case "failed":
-      return "failed";
-    case "waiting_permission":
-    case "waiting_user":
-      return "interrupt";
-    default:
-      return "other";
-  }
-}
+// 不播报的状态：空闲/离线/暂停不说话，只在有实际活动（工作/完成/失败/等待）时才报。
+const SILENT_STATES = new Set(["idle", "offline", "paused"]);
 
 const simulations = [
   { source: "claude-code", state: "thinking", message: "Claude Code 正在分析项目结构", title: "Claude Code 正在思考" },
@@ -107,7 +87,7 @@ export default function App() {
     return id;
   });
   const [deviceSecret, setDeviceSecret] = useState(() => window.localStorage.getItem("codestatus-device-secret") || "");
-  const [speechEnabled, setSpeechEnabled] = useState(true);
+  const [speechEnabled, setSpeechEnabled] = useState(() => window.localStorage.getItem("codestatus-speech") !== "0");
   const [displayMode, setDisplayMode] = useState(() => new URLSearchParams(window.location.search).get("display") === "1");
   const [showStage, setShowStage] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -257,9 +237,13 @@ export default function App() {
       };
       socket.onclose = () => {
         setConnected(false);
-        setRetryCount((count) => count + 1);
+        setRetryCount((count) => {
+          const next = count + 1;
+          const delay = Math.min(1000 * Math.pow(1.5, Math.min(next, 8)), 15000);
+          reconnectTimer = window.setTimeout(connect, delay);
+          return next;
+        });
         setConnectionDetail("实时通道断开，正在自动重连");
-        reconnectTimer = window.setTimeout(connect, 1200);
       };
       socket.onerror = () => {
         setConnected(false);
@@ -395,12 +379,11 @@ export default function App() {
   useEffect(() => {
     if (!speechEnabled || !status?.recentEvents?.length || !window.speechSynthesis) return;
     const event = status.recentEvents[0];
-    if (!event?.eventId || event.state === "offline" || event.state === "idle") return; // 空闲不播报，只在运行/需要处理时才说话
-    // 按软件（实例）分桶播报：开始/进行中/完成/失败/打断各报一次，同桶内切换不重复。
+    if (!event?.eventId) return;
+    if (SILENT_STATES.has(event.state)) return; // 离线不播报
+    // 每次状态切换都播报：按「状态+事件ID」去重，同一事件的重复推送不重报，状态变化即报。
     const instance = event.instanceId || event.source || "task";
-    const bucket = announceBucket(event.state);
-    if (bucket === "other") return; // 空闲/离线/暂停不播报（上方已挡 offline/idle）
-    const dedupKey = `${instance}::${bucket}`;
+    const dedupKey = `${event.state}::${event.eventId}`;
     if (lastSpokenByInstance.current.get(instance) === dedupKey) return;
     lastSpokenByInstance.current.set(instance, dedupKey);
     enqueueSpeak({ text: announcementForEvent(event), source: event.source });
@@ -472,6 +455,7 @@ export default function App() {
   function toggleSpeechEnabled() {
     setSpeechEnabled((enabled) => {
       const next = !enabled;
+      window.localStorage.setItem("codestatus-speech", next ? "1" : "0");
       if (!next) stopSpeech();
       return next;
     });
@@ -718,6 +702,7 @@ export default function App() {
           agentBase={agentBase}
           apiHeaders={apiHeaders}
           status={status}
+          sourceLabels={pairing?.sourceLabels}
           localVoices={localVoices}
           cloudVoices={voiceList}
           cloudEnabled={ttsCloudEnabled}
@@ -838,6 +823,8 @@ export default function App() {
           </div>
           <p className="answer">{answer}</p>
         </section>
+
+        <HookGuidePanel agentBase={agentBase} apiHeaders={apiHeaders} />
       </section>
     </>
   );
@@ -969,7 +956,7 @@ function ConnectionBanner({ connected, detail, retryCount }) {
     <div className={connected ? "connection-banner online" : "connection-banner offline"}>
       {connected ? <ShieldCheck size={17} /> : <AlertTriangle size={17} />}
       <span>{detail}</span>
-      {!connected && retryCount ? <strong>第 {retryCount} 次重试</strong> : null}
+      {!connected && retryCount ? <strong>（已重试 {retryCount} 次）</strong> : null}
     </div>
   );
 }
@@ -1096,6 +1083,96 @@ const notifyStateOptions = [
 ];
 
 const graceSecondsOptions = [0, 5, 10, 20, 30, 60];
+
+// Hook 安装引导（仅电脑端可用：检测 / 安装 Claude Code / Codex 的 CLI hook）
+function HookGuidePanel({ agentBase, apiHeaders }) {
+  const [hookStatus, setHookStatus] = useState(null);
+  const [installing, setInstalling] = useState("");
+  const [message, setMessage] = useState("");
+
+  const refresh = () => {
+    fetch(`${agentBase}/api/hooks/status`, { headers: apiHeaders })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => data && setHookStatus(data))
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    refresh();
+  }, [agentBase, apiHeaders]);
+
+  if (!hookStatus) return null;
+
+  const tools = [
+    { id: "claude-code", name: "Claude Code", desc: "Anthropic 的 AI 编程 CLI" },
+    { id: "codex", name: "Codex", desc: "OpenAI 的 AI 编程 CLI" }
+  ];
+
+  async function install(toolId, toolName) {
+    setInstalling(toolId);
+    setMessage("");
+    try {
+      const response = await fetch(`${agentBase}/api/hooks/install`, {
+        method: "POST",
+        headers: apiHeaders,
+        body: JSON.stringify({ tool: toolId })
+      });
+      const data = await response.json();
+      if (response.ok && data.ok) {
+        setMessage(`${toolName} Hook 安装成功`);
+        if (data.status) setHookStatus(data.status);
+      } else {
+        setMessage(`${toolName} 安装失败：${data.error || "未知错误"}`);
+      }
+    } catch (error) {
+      setMessage(`${toolName} 安装失败：${error.message}`);
+    } finally {
+      setInstalling("");
+    }
+  }
+
+  return (
+    <section className="panel notify-panel">
+      <div className="panel-title">
+        <ShieldCheck size={18} />
+        <h2>监控增强</h2>
+      </div>
+      <p className="notify-hint" style={{ marginBottom: 12 }}>
+        安装 CLI Hook 后可获得更精准的实时状态监控。进程检测（指纹库）无需安装即可工作，但 Hook 能提供更丰富的实时事件（工具调用、权限请求等）。
+      </p>
+      {tools.map((tool) => {
+        const installed = hookStatus[tool.id];
+        return (
+          <div key={tool.id} className="speech-row" style={{ alignItems: "center" }}>
+            <span>
+              <strong>{tool.name}</strong>
+              <br />
+              <small className="notify-hint">{tool.desc}</small>
+            </span>
+            <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              {installed ? (
+                <>
+                  <CheckCircle2 size={16} style={{ color: "var(--done, #2d9c72)" }} />
+                  <span style={{ fontSize: 13, color: "var(--done, #2d9c72)" }}>已安装</span>
+                </>
+              ) : (
+                <button
+                  className="chip active"
+                  disabled={installing === tool.id}
+                  onClick={() => install(tool.id, tool.name)}
+                  style={{ opacity: installing === tool.id ? 0.6 : 1 }}
+                >
+                  {installing === tool.id ? "安装中…" : "一键安装"}
+                </button>
+              )}
+            </span>
+          </div>
+        );
+      })}
+      {message && <p className="notify-hint" style={{ marginTop: 8 }}>{message}</p>}
+    </section>
+  );
+}
 
 // 消息推送设置（仅电脑端可用：/api/settings 只允许本机访问，手机端拿不到就不渲染）
 function NotificationPanel({ agentBase, apiHeaders }) {
@@ -1337,7 +1414,7 @@ function NotificationPanel({ agentBase, apiHeaders }) {
 
 // 按软件（source）设置独立音色/音量/语速，避免多软件播报串台、听不清。
 // 持久化到 settings.voiceOverrides = { "comfyui": { voice, volume, rate } }；留空=跟随全局。
-function VoiceOverridesPanel({ agentBase, apiHeaders, status, localVoices, cloudVoices, cloudEnabled }) {
+function VoiceOverridesPanel({ agentBase, apiHeaders, status, sourceLabels, localVoices, cloudVoices, cloudEnabled }) {
   const [overrides, setOverrides] = useState(null);
   const [saveState, setSaveState] = useState("");
 
@@ -1359,12 +1436,13 @@ function VoiceOverridesPanel({ agentBase, apiHeaders, status, localVoices, cloud
     for (const tool of status?.tools || []) {
       if (tool.isPlaceholder) continue;
       const key = tool.source || "generic";
+      if (key === "generic" || key.startsWith("_")) continue;
       if (!seen.has(key)) seen.set(key, tool.sourceLabel || tool.label || key);
     }
     return Array.from(seen, ([source, label]) => ({ source, label }));
   }, [status]);
 
-  if (overrides === null || !sources.length) return null;
+  if (overrides === null) return null;
 
   const get = (source) => overrides[source] || {};
   const setField = (source, field, value) => {

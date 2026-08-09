@@ -14,6 +14,7 @@ export function startTranscriptWatchers(onEvent) {
   const stops = [];
   const claudeRoot = path.join(os.homedir(), ".claude", "projects");
   const codexRoot = path.join(os.homedir(), ".codex", "sessions");
+  const kimiRoot = path.join(os.homedir(), ".kimi", "sessions");
 
   if (fs.existsSync(claudeRoot)) {
     stops.push(watchJsonlTree(claudeRoot, createClaudeLineHandler(onEvent)));
@@ -23,16 +24,21 @@ export function startTranscriptWatchers(onEvent) {
     stops.push(watchJsonlTree(codexRoot, createCodexLineHandler(onEvent)));
     console.log(`[watcher] 正在监听 Codex 会话日志：${codexRoot}`);
   }
+  if (fs.existsSync(kimiRoot)) {
+    stops.push(watchJsonlTree(kimiRoot, createKimiLineHandler(onEvent), (f) => f.endsWith("context.jsonl")));
+    console.log(`[watcher] 正在监听 Kimi CLI 会话日志：${kimiRoot}`);
+  }
 
   return () => stops.forEach((stop) => stop());
 }
 
 // ---- 通用 JSONL 目录尾随 ----
 
-function watchJsonlTree(root, handleLine) {
+function watchJsonlTree(root, handleLine, fileFilter) {
   // file -> { offset, remainder, timer, ctx }
   const tracked = new Map();
   let alive = true;
+  const accept = typeof fileFilter === "function" ? fileFilter : (f) => f.endsWith(".jsonl");
 
   function track(file, stats) {
     if (tracked.has(file)) return tracked.get(file);
@@ -44,7 +50,7 @@ function watchJsonlTree(root, handleLine) {
   }
 
   function poke(file) {
-    if (!alive || !file.endsWith(".jsonl")) return;
+    if (!alive || !accept(file)) return;
     let stats;
     try {
       stats = fs.statSync(file);
@@ -97,7 +103,7 @@ function watchJsonlTree(root, handleLine) {
 
   function rescan() {
     if (!alive) return;
-    for (const file of listJsonlFiles(root)) {
+    for (const file of listJsonlFiles(root, accept)) {
       let stats;
       try {
         stats = fs.statSync(file);
@@ -127,7 +133,7 @@ function watchJsonlTree(root, handleLine) {
   }
 
   // 初始扫描：登记现有文件（从末尾开始）
-  for (const file of listJsonlFiles(root)) {
+  for (const file of listJsonlFiles(root, accept)) {
     try {
       track(file, fs.statSync(file));
     } catch {
@@ -147,7 +153,7 @@ function watchJsonlTree(root, handleLine) {
   };
 }
 
-function listJsonlFiles(root, depth = 0, out = []) {
+function listJsonlFiles(root, accept, depth = 0, out = []) {
   if (depth > 6) return out;
   let dirents;
   try {
@@ -159,8 +165,8 @@ function listJsonlFiles(root, depth = 0, out = []) {
     const full = path.join(root, dirent.name);
     if (dirent.isDirectory()) {
       if (dirent.name === "subagents") continue; // 子代理日志并入主会话，不单独跟踪
-      listJsonlFiles(full, depth + 1, out);
-    } else if (dirent.name.endsWith(".jsonl")) {
+      listJsonlFiles(full, accept, depth + 1, out);
+    } else if (accept(full)) {
       out.push(full);
     }
   }
@@ -329,7 +335,102 @@ function createCodexLineHandler(onEvent) {
   };
 }
 
-function armPendingTimer(ctx, fire) {
+// ---- Kimi CLI 日志（~/.kimi/sessions/<hash>/<uuid>/context.jsonl）----
+
+function createKimiLineHandler(onEvent) {
+  return (line, file, ctx) => {
+    if (!line.role) return;
+    const segments = file.split(path.sep);
+    const sessionUuid = segments[segments.length - 2] || path.basename(file, ".jsonl");
+
+    const emit = (state, message, extra = {}) =>
+      onEvent({
+        source: "kimi-code",
+        sessionId: sessionUuid,
+        workspace: ctx.cwd || "",
+        model: ctx.model || "kimi",
+        confidence: 0.85,
+        state,
+        message,
+        ...extra
+      });
+
+    clearPendingTimer(ctx);
+
+    // 从系统提示中提取工作目录
+    if (line.role === "_system_prompt" && typeof line.content === "string") {
+      const m = line.content.match(/current working directory is[`\s]*([^`'\n]+)/i);
+      if (m) ctx.cwd = m[1].trim();
+      return;
+    }
+
+    if (line.role === "_checkpoint" || line.role === "_usage") return;
+
+    if (line.role === "user" && typeof line.content === "string") {
+      const text = line.content.trim();
+      if (text && !text.startsWith("<") && !text.startsWith("http")) {
+        emit("prompt_submitted", `收到新任务：${clip(text, 120)}`);
+      } else if (text.startsWith("http")) {
+        emit("prompt_submitted", `收到链接任务：${clip(text, 80)}`);
+      }
+      return;
+    }
+
+    if (line.role === "assistant") {
+      const content = Array.isArray(line.content) ? line.content : [];
+      const toolCalls = line.tool_calls || [];
+      const thinkItem = content.find((item) => item.type === "think");
+      const textItem = content.find((item) => item.type === "text");
+
+      if (toolCalls.length > 0) {
+        const call = toolCalls[0];
+        const name = call?.function?.name || "";
+        const args = (() => { try { return JSON.parse(call?.function?.arguments || "{}"); } catch { return {}; } })();
+        const { state, message } = mapKimiTool(name, args);
+        emit(state, message);
+        armPendingTimer(ctx, () =>
+          emit("waiting_permission", "较长时间没有新动作，可能在等待你的授权确认")
+        );
+        return;
+      }
+
+      if (thinkItem) {
+        emit("thinking", "正在思考下一步");
+        return;
+      }
+
+      if (textItem?.text) {
+        emit("completed", clip(textItem.text, 140));
+        return;
+      }
+    }
+
+    if (line.role === "tool") {
+      // 工具结果返回后，如果一段时间内没有新动作，判定为完成
+      armPendingTimer(ctx, () => emit("completed", "本轮工具调用已完成"), 30000);
+    }
+  };
+}
+
+function mapKimiTool(name, args) {
+  const n = String(name || "");
+  if (["WriteFile", "StrReplaceFile", "DeleteFile"].includes(n)) {
+    return { state: "writing_code", message: args.path ? `正在处理 ${args.path}` : "正在写代码" };
+  }
+  if (n === "Shell") {
+    const cmd = String(args.command || "");
+    if (/(test|vitest|jest|pytest|cargo test|go test|npm t|pnpm test|yarn test)/i.test(cmd)) {
+      return { state: "running_tests", message: clip(`正在测试：${cmd}`, 140) };
+    }
+    return { state: "running_command", message: clip(`正在执行：${cmd}`, 140) };
+  }
+  if (n === "Agent") {
+    return { state: "thinking", message: "正在委托子任务给子代理" };
+  }
+  return { state: "using_tool", message: `正在调用工具 ${n}` };
+}
+
+function armPendingTimer(ctx, fire, timeout = PENDING_TOOL_TIMEOUT_MS) {
   clearPendingTimer(ctx);
   ctx.pendingTimer = setTimeout(fire, PENDING_TOOL_TIMEOUT_MS);
 }

@@ -64,21 +64,33 @@ const ttsCache = new Map();
 
 const toolLabels = {
   "claude-code": "Claude Code",
-  "claude-dev": "Claude Dev",
   codex: "Codex",
-  vscode: "VS Code",
   cursor: "Cursor",
+  vscode: "VS Code",
+  "claude-dev": "Cline (Claude Dev)",
+  "kimi-code": "Kimi Code",
+  zcode: "ZCode",
+  "glm-code": "GLM Code",
+  "minimax-code": "MiniMax Code",
+  roo: "Roo Code",
+  continue: "Continue",
   generic: "通用监控",
-  // 采集器监控的常用 AI 工具（作为离线占位卡；运行后由采集器事件替换为实时状态）
   "opencode-desktop": "OpenCode",
   "kimi-desktop": "Kimi 桌面版",
   comfyui: "ComfyUI",
   ollama: "Ollama",
-  pycharm: "PyCharm",
-  autoglm: "AutoGLM"
+  windsurf: "Windsurf",
+  trae: "Trae",
+  pycharm: "PyCharm"
 };
 
-const initialTools = Object.keys(toolLabels).reduce((acc, source) => {
+const sourceOrder = Object.keys(toolLabels);
+
+const HIDDEN_SOURCES = new Set(["_discovery"]);
+
+const coreSources = ["claude-code", "codex", "cursor", "vscode"];
+
+const initialTools = coreSources.reduce((acc, source) => {
   const instanceId = `${source}::placeholder`;
   acc[instanceId] = {
     instanceId,
@@ -104,6 +116,103 @@ const store = {
   events: [],
   settings: loadSettings()
 };
+
+// ---- Hook 安装引导辅助函数 ----
+const HOOK_ADAPTERS_DIR = isSeaBuild ? path.join(BASE_DIR, "adapters") : path.join(BASE_DIR, "adapters");
+const HOOK_CONFIG = {
+  "claude-code": {
+    adapterFile: "claude-code-hook.mjs",
+    marker: "claude-code-hook.mjs",
+    configDir: ".claude",
+    configFile: "settings.json",
+    events: [
+      "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
+      "PostToolBatch", "SubagentStart", "SubagentStop", "TaskCreated", "TaskCompleted",
+      "PermissionRequest", "PermissionDenied", "Notification", "Stop", "StopFailure",
+      "SessionEnd", "CwdChanged", "FileChanged", "ConfigChange"
+    ]
+  },
+  codex: {
+    adapterFile: "codex-hook.mjs",
+    marker: "codex-hook.mjs",
+    configDir: ".codex",
+    configFile: "hooks.json",
+    events: [
+      "SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest",
+      "PostToolUse", "SubagentStart", "SubagentStop", "Stop"
+    ]
+  }
+};
+
+function checkHookStatus() {
+  const status = {};
+  for (const [tool, cfg] of Object.entries(HOOK_CONFIG)) {
+    const configPath = path.join(os.homedir(), cfg.configDir, cfg.configFile);
+    let installed = false;
+    try {
+      if (fs.existsSync(configPath)) {
+        const raw = fs.readFileSync(configPath, "utf8");
+        installed = raw.includes(cfg.marker);
+      }
+    } catch {
+      // 读取失败视为未安装
+    }
+    status[tool] = installed;
+  }
+  return status;
+}
+
+function installHook(tool) {
+  const cfg = HOOK_CONFIG[tool];
+  if (!cfg) throw new Error(`不支持的 hook 类型：${tool}`);
+  const hookScript = path.join(HOOK_ADAPTERS_DIR, cfg.adapterFile);
+  if (!fs.existsSync(hookScript)) {
+    throw new Error(`找不到适配器脚本：${hookScript}`);
+  }
+  const command = `node "${hookScript}"`;
+  const configDir = path.join(os.homedir(), cfg.configDir);
+  const configPath = path.join(configDir, cfg.configFile);
+  fs.mkdirSync(configDir, { recursive: true });
+
+  let config = {};
+  if (fs.existsSync(configPath)) {
+    const existing = fs.readFileSync(configPath, "utf8");
+    config = existing.trim() ? JSON.parse(existing) : {};
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const backupPath = `${configPath}.codestatus-backup-${ts}`;
+    fs.writeFileSync(backupPath, existing, "utf8");
+  }
+
+  config.hooks = config.hooks || {};
+  for (const event of cfg.events) {
+    config.hooks[event] = Array.isArray(config.hooks[event]) ? config.hooks[event] : [];
+    // 去重：移除已有的同名 hook 条目
+    config.hooks[event] = config.hooks[event]
+      .map((entry) => ({
+        ...entry,
+        hooks: Array.isArray(entry?.hooks)
+          ? entry.hooks.filter((hook) => !String(hook?.command || "").includes(cfg.marker))
+          : []
+      }))
+      .filter((entry) => entry.hooks.length > 0);
+
+    const hasCommand = config.hooks[event].some((entry) =>
+      Array.isArray(entry?.hooks) && entry.hooks.some((hook) => hook?.type === "command" && hook?.command === command)
+    );
+    if (!hasCommand) {
+      const hookEntry = { type: "command", command };
+      if (tool === "codex") {
+        hookEntry.commandWindows = command;
+        hookEntry.timeout = 30;
+        hookEntry.statusMessage = "Sending CodeStatus update";
+      }
+      config.hooks[event].push({ matcher: "", hooks: [hookEntry] });
+    }
+  }
+
+  fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  return { tool, configPath };
+}
 
 const requestHandler = async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
@@ -155,7 +264,8 @@ const requestHandler = async (req, res) => {
       secureAgentUrl: isLoopback(req) ? secureAgentUrl(req) : undefined,
       certificateFingerprint: isLoopback(req) ? certificateInfo?.fingerprint256 : undefined,
       devices: isLoopback(req) ? store.settings.devices.map(publicDevice) : undefined,
-      revokedDevices: isLoopback(req) ? (store.settings.revokedDevices || []) : undefined
+      revokedDevices: isLoopback(req) ? (store.settings.revokedDevices || []) : undefined,
+      sourceLabels: toolLabels
     });
   }
 
@@ -310,6 +420,24 @@ const requestHandler = async (req, res) => {
     return;
   }
 
+  // ---- Hook 安装引导：检查 / 安装 Claude Code / Codex 的 CLI hook ----
+  if (req.method === "GET" && url.pathname === "/api/hooks/status") {
+    if (!isLoopback(req)) return sendJson(res, { error: "Desktop access required" }, 403);
+    return sendJson(res, checkHookStatus());
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/hooks/install") {
+    if (!isLoopback(req)) return sendJson(res, { error: "Desktop access required" }, 403);
+    const body = await readJson(req);
+    const tool = String(body.tool || "");
+    try {
+      const result = installHook(tool);
+      return sendJson(res, { ok: true, ...result, status: checkHookStatus() });
+    } catch (error) {
+      return sendJson(res, { error: error.message || "安装失败" }, 500);
+    }
+  }
+
   return sendJson(res, { error: "Not found" }, 404);
 };
 
@@ -426,6 +554,61 @@ function synthesizeEdgeTts(text, voice, ratePercent = 0, volume = 1) {
   });
 }
 
+// ---- Kimi Code (VS Code 插件版) 活跃度监听 ----
+// Kimi Code 插件在写代码前会在 globalStorage/baselines/ 下创建/更新 manifest.json + snapshots/。
+// 这些文件的变化是 Kimi Code 正在工作的可靠信号，无需依赖 VS Code 插件的弱信号归因。
+function startKimiBaselineWatcher(onEvent) {
+  const storageBase = path.join(os.homedir(), "AppData", "Roaming", "Code", "User", "globalStorage", "moonshot-ai.kimi-code", "baselines");
+  if (!fs.existsSync(storageBase)) return () => {};
+
+  let lastReportAt = 0;
+  const THROTTLE_MS = 3000; // 同一轮写入（可能涉及大量 snapshot 文件）只报一次
+  const timer = setInterval(() => {
+    try {
+      // 扫描所有 session 的 manifest.json，找最近修改的
+      const now = Date.now();
+      let latest = 0;
+      for (const dir of fs.readdirSync(storageBase, { withFileTypes: true })) {
+        if (!dir.isDirectory()) continue;
+        const sessionDir = path.join(storageBase, dir.name);
+        for (const sub of fs.readdirSync(sessionDir, { withFileTypes: true })) {
+          if (!sub.isDirectory()) continue;
+          const manifest = path.join(sessionDir, sub.name, "manifest.json");
+          try {
+            const stat = fs.statSync(manifest);
+            if (stat.mtimeMs > latest) latest = stat.mtimeMs;
+          } catch { /* skip */ }
+          // snapshots 目录内的文件也是活跃信号
+          const snapDir = path.join(sessionDir, sub.name, "snapshots");
+          try {
+            for (const snap of fs.readdirSync(snapDir)) {
+              const stat = fs.statSync(path.join(snapDir, snap));
+              if (stat.mtimeMs > latest) latest = stat.mtimeMs;
+            }
+          } catch { /* skip */ }
+        }
+      }
+      // 最近 3 分钟内有文件更新 = Kimi Code 正在工作（思考阶段可能数分钟不写文件，窗口需放宽）
+      if (latest > 0 && now - latest < 180000 && now - lastReportAt > THROTTLE_MS) {
+        lastReportAt = now;
+        onEvent({
+          source: "kimi-code",
+          instanceId: "kimi-code::vscode-extension",
+          sourceLabel: "Kimi Code",
+          label: "Kimi Code",
+          state: "writing_code",
+          title: "Kimi Code 正在写代码",
+          message: "检测到文件变更活动",
+          confidence: 0.75,
+          severity: "info"
+        });
+      }
+    } catch { /* ignore scan errors */ }
+  }, 5000); // 每 5 秒扫描一次
+
+  return () => clearInterval(timer);
+}
+
 const server = http.createServer(requestHandler);
 
 const websocketServers = [];
@@ -440,9 +623,9 @@ let collectorStop = null;
 async function bootstrap() {
   setupWebSocket(server);
 
-  // 便携版：尽早启动托盘并隐藏控制台（后台常驻），日志落盘 data/server.log 便于排查。
-  if (isSeaBuild) {
-    if (process.env.CODESTATUS_LOG_FILE !== "0") redirectLogs();
+  // 托盘常驻：Windows 平台均启动（打包版隐藏控制台，开发态保留）。
+  if (process.platform === "win32") {
+    if (isSeaBuild && process.env.CODESTATUS_LOG_FILE !== "0") redirectLogs();
     trayChild = startSystemTray();
   }
 
@@ -470,6 +653,13 @@ async function bootstrap() {
         startTranscriptWatchers((event) => ingest(event));
       } catch (error) {
         console.warn(`[watcher] 日志监听启动失败：${error.message}`);
+      }
+      // Kimi Code (VS Code 插件版) 活跃度监听：通过 baseline 文件变化检测写代码活动
+      try {
+        startKimiBaselineWatcher((event) => ingest(event));
+        console.log(`[kimi-baseline] 正在监听 Kimi Code 插件活跃度`);
+      } catch (error) {
+        console.warn(`[kimi-baseline] 监听启动失败：${error.message}`);
       }
     }
     // 内嵌采集器：监控 ComfyUI / Ollama / OpenCode / Kimi / PyCharm 等 AI 工具，事件直送 ingest（免 HTTP）。
@@ -604,23 +794,55 @@ function ensureDesktopShortcut() {
 }
 
 // 任务栏托盘 PowerShell 脚本（便携版后台常驻）：
-//  1) 隐藏父进程(exe)的控制台窗口（PS 子进程继承同一控制台，GetConsoleWindow 返回的即 exe 的控制台）；
-//  2) NotifyIcon + 右键菜单「打开软件页面 / 退出软件」，菜单动作回打本机 HTTP 端点；
+//  1) NotifyIcon（自绘图标，不依赖 exe 内嵌图标）+ 右键菜单「打开软件页面 / 退出软件」；
+//  2) 菜单动作回打本机 HTTP 端点；
 //  3) 父进程看门狗：exe 一旦消失（崩溃/被杀/端口占用自退），托盘自动消失，避免残留图标。
 // 用 -EncodedCommand（UTF-16LE base64）传递，规避控制台代码页对中文的乱码。
 const TRAY_PS_SCRIPT = `
 $ErrorActionPreference='Continue'
-Add-Type -Namespace CStat -Name Win -MemberDefinition '[DllImport("kernel32.dll")] public static extern System.IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr hWnd, int n);'
-if($env:CODESTATUS_NO_HIDE -ne '1'){
-  $h=[CStat.Win]::GetConsoleWindow()
-  if($h -ne [System.IntPtr]::Zero){ [void][CStat.Win]::ShowWindow($h,0) }
-}
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+
+# --- 自绘托盘图标（橙色圆角方块 + 白色心跳波形，小尺寸下清晰可辨）---
+function New-CSIcon($sz){
+  $bmp=New-Object System.Drawing.Bitmap($sz,$sz)
+  $g=[System.Drawing.Graphics]::FromImage($bmp)
+  $g.SmoothingMode=[System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+  $g.TextRenderingHint=[System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+  $g.Clear([System.Drawing.Color]::Transparent)
+  $radius=[int]($sz*0.22)
+  $rect=New-Object System.Drawing.Rectangle(0,0,$sz,$sz)
+  $path=New-Object System.Drawing.Drawing2D.GraphicsPath
+  $path.AddArc($rect.X,$rect.Y,$radius*2,$radius*2,180,90)
+  $path.AddArc($rect.Right-$radius*2,$rect.Y,$radius*2,$radius*2,270,90)
+  $path.AddArc($rect.Right-$radius*2,$rect.Bottom-$radius*2,$radius*2,$radius*2,0,90)
+  $path.AddArc($rect.X,$rect.Bottom-$radius*2,$radius*2,$radius*2,90,90)
+  $path.CloseFigure()
+  $orange=New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255,255,122,26))
+  $g.FillPath($orange,$path)
+  $pen=New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(255,26,15,8),[Math]::Max(1,$sz*0.04))
+  $g.DrawPath($pen,$path)
+  $white=New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(255,255,255,255),[Math]::Max(1.5,$sz*0.09))
+  $white.StartCap=[System.Drawing.Drawing2D.LineCap]::Round
+  $white.EndCap=[System.Drawing.Drawing2D.LineCap]::Round
+  $mid=[double]($sz*0.5)
+  $g.DrawLines($white,@(
+    (New-Object System.Drawing.PointF(($sz*0.22),($mid))),
+    (New-Object System.Drawing.PointF(($sz*0.38),($mid))),
+    (New-Object System.Drawing.PointF(($sz*0.46),($sz*0.30))),
+    (New-Object System.Drawing.PointF(($sz*0.56),($sz*0.70))),
+    (New-Object System.Drawing.PointF(($sz*0.64),($mid))),
+    (New-Object System.Drawing.PointF(($sz*0.78),($mid)))
+  ))
+  $g.Dispose()
+  $h=$bmp.GetHicon()
+  return [System.Drawing.Icon]::FromHandle($h)
+}
+
 $exePid=$env:CODESTATUS_EXE_PID
 $base='http://127.0.0.1:4317'
 $icon=New-Object System.Windows.Forms.NotifyIcon
-try{ $icon.Icon=[System.Drawing.Icon]::ExtractAssociatedIcon($env:CODESTATUS_EXE) }catch{ try{ $icon.Icon=[System.Drawing.SystemIcons]::Application }catch{} }
+try{ $icon.Icon=(New-CSIcon 32) }catch{ try{ $icon.Icon=[System.Drawing.SystemIcons]::Application }catch{} }
 $icon.Text='CodeStatus 监控'
 $icon.Visible=$true
 $menu=New-Object System.Windows.Forms.ContextMenuStrip
@@ -636,10 +858,20 @@ $watch.Start()
 [System.Windows.Forms.Application]::Run()
 `;
 
-// 启动托盘（仅便携版）。返回 PS 子进程，退出时由 gracefulShutdown 回收。
+// 启动托盘（Windows 平台）。返回 PS 子进程，退出时由 gracefulShutdown 回收。
+// 打包版隐藏控制台；开发态保留控制台（CODESTATUS_NO_HIDE=1 同样保留）。
 function startSystemTray() {
-  if (process.platform !== "win32" || !isSeaBuild) return null;
-  const encoded = Buffer.from(TRAY_PS_SCRIPT, "utf16le").toString("base64");
+  if (process.platform !== "win32") return null;
+  let script = TRAY_PS_SCRIPT;
+  if (isSeaBuild && process.env.CODESTATUS_NO_HIDE !== "1") {
+    script = `
+$ErrorActionPreference='Continue'
+Add-Type -Namespace CStat -Name Win -MemberDefinition '[DllImport("kernel32.dll")] public static extern System.IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr hWnd, int n);'
+$h=[CStat.Win]::GetConsoleWindow()
+if($h -ne [System.IntPtr]::Zero){ [void][CStat.Win]::ShowWindow($h,0) }
+` + script;
+  }
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
   const child = spawn(
     "powershell.exe",
     ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
@@ -1151,14 +1383,19 @@ function snapshot() {
   const activeSources = new Set(values.filter((tool) => !tool.isPlaceholder).map((tool) => tool.source));
   const tools = values
     .filter((tool) => !(tool.isPlaceholder && activeSources.has(tool.source)))
+    .filter((tool) => !HIDDEN_SOURCES.has(tool.source))
     .sort((a, b) => {
-    const aTime = a.updatedAt ? Date.parse(a.updatedAt) : 0;
-    const bTime = b.updatedAt ? Date.parse(b.updatedAt) : 0;
-    return bTime - aTime;
-  });
+      const ai = sourceOrder.indexOf(a.source);
+      const bi = sourceOrder.indexOf(b.source);
+      const aIdx = ai === -1 ? sourceOrder.length : ai;
+      const bIdx = bi === -1 ? sourceOrder.length : bi;
+      if (aIdx !== bIdx) return aIdx - bIdx;
+      return String(a.instanceId).localeCompare(String(b.instanceId));
+    });
   const activeTool = tools.find((tool) => !["offline", "idle"].includes(tool.state)) || tools[0] || null;
   const visibleTools = store.settings.privacyMode ? tools.map(redactTool) : tools;
-  const visibleEvents = store.settings.privacyMode ? store.events.slice(0, 12).map(redactEvent) : store.events.slice(0, 12);
+  const allEvents = store.events.filter((e) => !HIDDEN_SOURCES.has(e.source));
+  const visibleEvents = store.settings.privacyMode ? allEvents.slice(0, 12).map(redactEvent) : allEvents.slice(0, 12);
   return {
     generatedAt: new Date().toISOString(),
     activeSource: activeTool?.source || null,
@@ -1280,6 +1517,7 @@ function publicSettings() {
       note: httpsServer ? "使用本机自签名证书，首次访问需要信任证书。" : "HTTPS 通道未启动。"
     },
     voiceOverrides: store.settings.voiceOverrides || {},
+    sourceLabels: toolLabels,
     devices: store.settings.devices
       .map(publicDevice),
     revokedDevices: (store.settings.revokedDevices || []).map((device) => ({

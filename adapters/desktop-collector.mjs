@@ -69,6 +69,7 @@ export function startCollector({ fingerprintsPath, machineIdPath, onEvent, autoD
       busyStreak: 0,
       idleStreak: 0,
       online: false,
+      everOnline: false,
       cpuPct: 0,
       httpSeen: false,
     });
@@ -196,7 +197,9 @@ async function tick() {
   for (const fp of fps) {
     const st = states.get(fp.source);
     st.online = sourcePids.has(fp.source);
+    if (st.online) st.everOnline = true;
     if (fp.httpProbe) continue;
+    if (!st.everOnline) continue; // 从未在本机检测到，不报 offline，避免占满监控面板
     if (fp.enhanced && st.online) {
       // 增强采集：进程树工作子进程检测（OpenCode 等 Electron AI IDE 跑命令挂在 sidecar 子进程树下）
       evalEnhanced(fp, procs, fg, st);
@@ -333,6 +336,8 @@ async function httpTick() {
       }
     }
     st.httpSeen = true;
+    if (reachable || st.online) st.everOnline = true;
+    if (!st.everOnline) continue; // 从未在本机检测到，不报 offline
     evalHttp(fp, { online: st.online, reachable, data, cpuPct: st.cpuPct }, st);
   }
 }
@@ -426,17 +431,18 @@ async function fastTick() {
 function apply(fp, target, st) {
   if (!target) return;
   const now = Date.now();
+  // 从离线恢复到在线：立即上报，不受任何节流限制（解决"软件启动后延迟显示"问题）
+  const comingOnline = st.state === "offline" && target.state !== "offline";
   if (target.state === st.state) {
     if (target.state === "running_command") {
-      // 运行中：每 ~10s 刷新进度（出图步数/推理状态）
-      if (now - st.lastReport < config.throttleMs * 4) return;
+      // 运行中：定期刷新进度
+      if (now - st.lastReport < config.throttleMs * 3) return;
     } else {
-      // 空闲/前台/完成/下线等：低频心跳保活（90s），不刷屏
-      if (now - st.lastReport < 90000) return;
+      // 空闲/前台/完成/下线等：低频心跳保活，不刷屏
+      if (now - st.lastReport < 30000) return;
     }
-  } else if (now - st.lastReport < config.throttleMs) {
-    return; // 状态变化也要节流，防抖
   }
+  // 状态变化立即上报（comingOnline 优先跳过所有节流）
   st.state = target.state;
   st.lastReport = now;
   report(fp, target);

@@ -26,12 +26,11 @@ const ID_PATH = path.join(APPDATA_DIR, "collector-id.json");
 const config = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
 const fps = config.fingerprints.filter((f) => f.enabled !== false);
 
-// 已由其他 adapter（VSCode 扩展 / Claude Code / Codex hook）覆盖，发现到不重复纳入
+// 已由其他 adapter（VSCode 扩展）覆盖，发现到不重复纳入
+// 注：Claude Code / Codex 现已纳入 fingerprints 指纹库（进程检测），不再标记为 covered
 const COVERED = [
   { label: "VS Code / 其内 AI 扩展（已有扩展采集）", kw: ["visual studio code", "vscode"] },
   { label: "Cursor（复用 VSCode 扩展）", kw: ["cursor"] },
-  { label: "Claude Code（已有 hook）", kw: ["claude"] },
-  { label: "Codex / ChatGPT（已有 hook）", kw: ["codex", "chatgpt"] },
 ];
 
 const AI_KW = "Cursor|Windsurf|Codeium|Trae|Zed|Void|PearAI|Pear|JetBrains|PyCharm|WebStorm|IntelliJ|GoLand|RustRover|CLion|PhpStorm|OpenCode|Kimi|AutoGLM|Claude|Codex|Copilot|Cline|Roo|Aider|Continue|CodeGeeX|GLM|MiniMax|ComfyUI|Comfy|Ollama|LM Studio|Stable Diffusion|Automatic1111|A1111|Forge|Pieces|Zhipu|Moonshot|Anthropic";
@@ -129,21 +128,6 @@ export async function reportDiscovery(r) {
       body: JSON.stringify(ev),
       signal: AbortSignal.timeout(2500),
     }).catch(() => {});
-
-  for (const m of r.matched) {
-    await post({
-      source: m.source,
-      instanceId: `${m.source}::${mid}`,
-      sourceLabel: m.label,
-      label: m.label,
-      state: "idle",
-      confidence: 0.4,
-      summary: `已发现 ${m.label}`,
-      detail: `证据：${m.evidence.join("；")}`,
-      severity: "info",
-      raw: { discovered: true, evidence: m.evidence },
-    });
-  }
 
   const names = r.matched.map((m) => m.label);
   await post({

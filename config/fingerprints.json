@@ -4,17 +4,17 @@
   "fallbackUrl": "http://127.0.0.1:4317/events",
   "pollMs": {
     "foreground": 1500,
-    "process": 4000,
-    "http": 8000
+    "process": 2000,
+    "http": 5000
   },
   "cpu": {
-    "busyPct": 30,
-    "genPct": 15,
+    "busyPct": 25,
+    "genPct": 12,
     "idlePct": 5,
     "busyCycles": 1,
     "idleCycles": 2
   },
-  "throttleMs": 2500,
+  "throttleMs": 1500,
   "fingerprints": [
     {
       "source": "opencode-desktop",
@@ -33,6 +33,42 @@
       "processNames": ["Kimi.exe"],
       "pathKeywords": ["kimi-desktop"],
       "windowKeywords": ["Kimi"],
+      "enabled": true
+    },
+    {
+      "source": "kimi-code",
+      "label": "Kimi CLI",
+      "type": "runtime",
+      "processNames": ["node.exe"],
+      "commandPatterns": ["kimi-code", "kimi-cli", "@moonshot-ai[\\\\/]kimi"],
+      "pathKeywords": ["@moonshot-ai", "kimi-code", "kimi-cli"],
+      "enabled": true
+    },
+    {
+      "source": "claude-code",
+      "label": "Claude Code",
+      "type": "runtime",
+      "processNames": ["node.exe"],
+      "commandPatterns": ["\\bclaude\\b", "@anthropic-ai[\\\\/]claude-code"],
+      "pathKeywords": ["@anthropic-ai", "claude-code"],
+      "enabled": true
+    },
+    {
+      "source": "codex",
+      "label": "Codex",
+      "type": "runtime",
+      "processNames": ["node.exe"],
+      "commandPatterns": ["\\bcodex\\b", "@openai[\\\\/]codex"],
+      "pathKeywords": ["@openai", "codex"],
+      "enabled": true
+    },
+    {
+      "source": "zcode",
+      "label": "ZCode",
+      "type": "desktop",
+      "processNames": ["ZCode.exe"],
+      "pathKeywords": ["zcode"],
+      "windowKeywords": ["ZCode", "Z Code"],
       "enabled": true
     },
     {

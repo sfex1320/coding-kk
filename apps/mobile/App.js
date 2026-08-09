@@ -113,6 +113,7 @@ export default function App() {
       const deviceSecret = await storage.getItem("codestatus-device-secret");
       if (host && deviceSecret) setAgent({ host, deviceId, deviceSecret });
       setRepeatMinutes(Number((await storage.getItem("codestatus-repeat")) || 0));
+      setSpeechEnabled((await storage.getItem("codestatus-speech")) !== "false");
       setHydrated(true);
     })();
   }, []);
@@ -175,15 +176,17 @@ export default function App() {
 
   activeToolRef.current = activeTool;
 
-  // 语音播报新事件：按软件分别去重，只在「主标题分组」(STATE_TONE) 变化时播报
+  // 语音播报新事件：每次状态切换都播报，按「状态+事件ID」去重防重复推送
   useEffect(() => {
     if (!speechEnabled) return;
     const event = status?.recentEvents?.[0];
-    if (!event?.eventId || event.state === "offline") return;
+    if (!event?.eventId) return;
+    // 空闲/离线/暂停不播报
+    if (event.state === "idle" || event.state === "offline" || event.state === "paused") return;
     const instance = event.instanceId || event.source || "task";
-    const category = STATE_TONE[event.state] || event.state;
-    if (lastSpokenByInstance.current.get(instance) === category) return;
-    lastSpokenByInstance.current.set(instance, category);
+    const dedupKey = `${event.state}::${event.eventId}`;
+    if (lastSpokenByInstance.current.get(instance) === dedupKey) return;
+    lastSpokenByInstance.current.set(instance, dedupKey);
     Speech.speak(briefSpeech(event), { language: "zh-CN" });
   }, [status, speechEnabled]);
 
@@ -200,6 +203,14 @@ export default function App() {
   function changeRepeat(minutes) {
     setRepeatMinutes(minutes);
     storage.setItem("codestatus-repeat", String(minutes));
+  }
+
+  function toggleSpeech() {
+    setSpeechEnabled((v) => {
+      const next = !v;
+      storage.setItem("codestatus-speech", String(next));
+      return next;
+    });
   }
 
   function briefSpeech(item) {
@@ -383,7 +394,7 @@ export default function App() {
         </View>
         <View style={styles.stageBar}>
           <BarButton label="◀" onPress={() => stepInstance(-1)} />
-          <BarButton label={speechEnabled ? "语音开" : "语音关"} onPress={() => setSpeechEnabled((v) => !v)} />
+          <BarButton label={speechEnabled ? "语音开" : "语音关"} onPress={toggleSpeech} />
           <BarButton label="播报" onPress={() => activeTool && Speech.speak(briefSpeech(activeTool), { language: "zh-CN" })} />
           <BarButton label="返回" onPress={() => setScreen("primary")} />
           <BarButton label="▶" onPress={() => stepInstance(1)} />
@@ -405,7 +416,7 @@ export default function App() {
             </Text>
           </View>
           <View style={styles.headerActions}>
-            <SmallButton label={speechEnabled ? "语音开" : "语音关"} onPress={() => setSpeechEnabled((v) => !v)} />
+            <SmallButton label={speechEnabled ? "语音开" : "语音关"} onPress={toggleSpeech} />
             <SmallButton label="配对" onPress={resetPairing} />
           </View>
         </View>

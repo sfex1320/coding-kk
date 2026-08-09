@@ -13,17 +13,23 @@ const vscode = require("vscode");
 
 // 默认内置的 AI 工具注册表（可被设置覆盖 / 追加）
 const DEFAULT_AGENTS = [
-  { source: "claude-dev", label: "Claude Dev", extensionIds: ["saoudrizwan.claude-dev"], commandPatterns: ["\\bcline\\b"], terminalPatterns: ["cline", "claude dev"] },
-  { source: "kimi-code", label: "Kimi Code", extensionIds: ["moonshot", "kimi"], commandPatterns: ["\\bkimi(-code)?\\b"], terminalPatterns: ["kimi"] },
+  { source: "claude-dev", label: "Cline", extensionIds: ["saoudrizwan.claude-dev", "anysphere.cline"], commandPatterns: ["\\bcline\\b"], terminalPatterns: ["cline", "claude dev"] },
+  { source: "kimi-code", label: "Kimi Code", extensionIds: ["moonshot-ai.kimi-code", "moonshot", "kimi"], commandPatterns: ["\\bkimi(-code)?\\b"], terminalPatterns: ["kimi", "kimi-code"] },
+  { source: "zcode", label: "ZCode", extensionIds: ["zcode", "z.ai", "zai"], commandPatterns: ["\\bzcode\\b", "\\bz\\.ai\\b"], terminalPatterns: ["zcode", "z.ai"] },
   { source: "minimax-code", label: "MiniMax Code", extensionIds: ["minimax"], commandPatterns: ["\\bminimax\\b", "\\bmmx\\b"], terminalPatterns: ["minimax"] },
-  { source: "glm-code", label: "GLM Code", extensionIds: ["zhipu", "glm", "codegeex"], commandPatterns: ["\\bglm(-code)?\\b", "codegeex"], terminalPatterns: ["glm", "codegeex"] }
+  { source: "glm-code", label: "GLM Code", extensionIds: ["zhipu", "glm", "codegeex"], commandPatterns: ["\\bglm(-code)?\\b", "codegeex"], terminalPatterns: ["glm", "codegeex"] },
+  { source: "roo", label: "Roo Code", extensionIds: ["rooveterinaryinc.roo-cline", "roo-cline", "roo"], commandPatterns: ["\\broo(-cline)?\\b"], terminalPatterns: ["roo"] },
+  { source: "continue", label: "Continue", extensionIds: ["continue.continue"], commandPatterns: ["\\bcontinue\\b"], terminalPatterns: ["continue"] },
+  { source: "aider", label: "Aider", extensionIds: [], commandPatterns: ["\\baider\\b"], terminalPatterns: ["aider"] },
+  { source: "claude-code", label: "Claude Code", extensionIds: [], commandPatterns: ["\\bclaude\\b"], terminalPatterns: ["claude"] },
+  { source: "codex", label: "Codex", extensionIds: [], commandPatterns: ["\\bcodex\\b"], terminalPatterns: ["codex"] }
 ];
 
 const IGNORE_PATH = /(^|[\\/])(node_modules|\.git|dist|out|build|\.next|target|\.venv|coverage)([\\/]|$)/i;
 const EDITOR_IDLE_AFTER_MS = 15000;
 const AGENT_IDLE_AFTER_MS = 15000;
 const AGENT_ACTIVE_WINDOW_MS = 45000; // 终端命令命中后，多久内的文件写入仍归因给该工具
-const USER_INPUT_WINDOW_MS = 700;
+const USER_INPUT_WINDOW_MS = 1500;
 const REPORT_THROTTLE_MS = 2500; // 同一来源 writing_code 的最小上报间隔
 
 function activate(context) {
@@ -110,6 +116,16 @@ function activate(context) {
   for (const agent of installedAgents) {
     report(agent.source, agent.label, "idle", { confidence: 0.5, summary: `${agent.label} 已就绪`, detail: "已检测到对应扩展" });
   }
+
+  // 心跳保活：每 15 秒重发当前状态，确保 Agent 能感知到插件在线。
+  // 解决插件激活时 Agent 未运行导致的首个事件丢失后无法重连的问题。
+  const heartbeatTimer = setInterval(() => {
+    reportEditor(editorState, { summary: `${editorLabel} ${editorState === "idle" ? "在线" : "活动中"}`, detail: "心跳" });
+    for (const agent of installedAgents) {
+      report(agent.source, agent.label, "idle", { confidence: 0.5, summary: `${agent.label} 已就绪`, detail: "心跳" });
+    }
+  }, 15000);
+  context.subscriptions.push({ dispose: () => clearInterval(heartbeatTimer) });
 
   // 人工输入信号
   context.subscriptions.push(
@@ -284,11 +300,24 @@ function compilePatterns(patterns) {
 }
 
 function agentInstalled(agent) {
+  // 精确匹配优先
   for (const id of agent.extensionIds || []) {
     if (safe(() => vscode.extensions.getExtension(id))) return true;
   }
+  // 子串匹配退回：要求扩展 ID 包含关键词，且 publisher 部分或扩展名部分匹配
+  // 避免短关键词（如 "kimi"）误匹配不相关扩展（如 "kimi-lm-provider" 不等于 "kimi-code"）
   const all = safe(() => vscode.extensions.all) || [];
-  return all.some((ext) => (agent.extensionIds || []).some((id) => ext.id.toLowerCase().includes(String(id).toLowerCase())));
+  return all.some((ext) => {
+    const extId = ext.id.toLowerCase();
+    return (agent.extensionIds || []).some((id) => {
+      const kw = String(id).toLowerCase();
+      // 精确 ID 直接匹配
+      if (extId === kw) return true;
+      // publisher.name 格式的关键词匹配 publisher 或 name 部分
+      const parts = extId.split(".");
+      return parts.some((part) => part === kw || (part.length > 2 && part.includes(kw)));
+    });
+  });
 }
 
 function matchAgent(agents, command, terminalName) {
