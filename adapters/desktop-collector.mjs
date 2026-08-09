@@ -17,55 +17,95 @@ import crypto from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CONFIG_PATH = path.join(__dirname, "..", "config", "fingerprints.json");
-const APPDATA_DIR = path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "CodeStatus");
-const ID_PATH = path.join(APPDATA_DIR, "collector-id.json");
-
-const config = loadConfig();
-const machineId = loadMachineId();
-const fps = config.fingerprints.filter((f) => f.enabled !== false);
-const cpuConf = config.cpu;
-const poll = config.pollMs;
-const fastPrev = new Map(); // busyOnCpu runner 进程的 CPU 前值（1s 快采样用）
-
-// 每个 source 的运行时状态
-const states = new Map();
-for (const fp of fps) {
-  states.set(fp.source, {
-    state: "offline",
-    lastReport: 0,
-    prevCpu: new Map(),
-    busyStreak: 0,
-    idleStreak: 0,
-    online: false,
-    cpuPct: 0,
-    httpSeen: false,
-  });
-}
-
-log(`通用采集器启动 (machineId=${machineId})`);
-log(`监控 ${fps.length} 个指纹：${fps.map((f) => f.label).join("、")}`);
-log(`上报 -> ${config.agentUrl}（回退 ${config.fallbackUrl}）`);
-
-async function main() {
-  await tick();
-  setInterval(tick, poll.process);
-  httpTick();
-  setInterval(httpTick, poll.http);
-  fastTick();
-  setInterval(fastTick, 1000); // 1s 快采样 runner CPU，抓 GPU 推理 prefill 尖峰
-
-  // 启动时跑一次自动发现（独立子进程，失败不影响采集）
+// 是否以打包版（SEA .exe）运行：可执行文件名不是 node 即视为打包版。
+// SEA 下 process.execPath 是 exe 本身，不能再 spawn 它来跑 .mjs 脚本（会重启 server）。
+const isSeaBuild = !/^node(\.exe)?$/i.test(path.basename(process.execPath || "node"));
+// SEA/CJS 打包时 import.meta.url 不可用（esbuild 警告 "will be empty"），fileURLToPath(undefined) 会抛错。
+// 集中在一处 try/catch 回退；__dirname 仅 CLI 缺省指纹路径用，__thisFile 仅 CLI 主入口检测用。
+// 内嵌时 server 总会传 fingerprintsPath，且 SEA 下 argv[1] 为空使主入口判断自动跳过——两值都用不到。
+let __thisFile = "";
+const __dirname = (() => {
   try {
-    const scanPath = path.join(__dirname, "..", "scripts", "scan-ai-tools.mjs");
-    if (fs.existsSync(scanPath)) {
-      spawn(process.execPath, [scanPath, "--report"], { stdio: "ignore", windowsHide: true, detached: false });
-      log("已触发自动发现（scan-ai-tools --report）");
-    }
+    __thisFile = fileURLToPath(import.meta.url);
+    return path.dirname(__thisFile);
   } catch {
-    /* ignore */
+    return path.dirname(process.execPath || ".");
   }
+})();
+const CONFIG_PATH_DEFAULT = path.join(__dirname, "..", "config", "fingerprints.json");
+const APPDATA_DIR = path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "CodeStatus");
+const ID_PATH_DEFAULT = path.join(APPDATA_DIR, "collector-id.json");
+
+// 运行时状态（由 startCollector 初始化；模块级以便各 helper 共享，helper 都在 startCollector 之后才被调用）。
+let config = null;
+let machineId = null;
+let fps = [];
+let cpuConf = {};
+let poll = {};
+let fastPrev = new Map(); // busyOnCpu runner 进程的 CPU 前值（1s 快采样用）
+let states = new Map(); // 每个 source 的运行时状态
+let dispatchEvent = null; // 上报出口：内嵌时直调 ingest()，CLI 时走 post()
+
+/**
+ * 启动采集器。既可被 CodeStatus 主进程内嵌调用（onEvent 直送 ingest，零延迟、免 HTTP），
+ * 也可作为独立 CLI 运行（缺省 onEvent 时走 post() → HTTP）。
+ * @param {{ fingerprintsPath?: string, machineIdPath?: string, onEvent?: (ev:any)=>void, autoDiscover?: boolean }} opts
+ * @returns {{ stop: () => void }}
+ */
+export function startCollector({ fingerprintsPath, machineIdPath, onEvent, autoDiscover = true } = {}) {
+  if (config) return { stop() {} }; // 防止重复启动造成双倍定时器
+  config = loadConfig(fingerprintsPath || CONFIG_PATH_DEFAULT); // 失败抛出，交调用方 try/catch
+  machineId = loadMachineId(machineIdPath || ID_PATH_DEFAULT);
+  fps = config.fingerprints.filter((f) => f.enabled !== false);
+  cpuConf = config.cpu;
+  poll = config.pollMs;
+  fastPrev = new Map();
+  states = new Map();
+  for (const fp of fps) {
+    states.set(fp.source, {
+      state: "offline",
+      lastReport: 0,
+      prevCpu: new Map(),
+      busyStreak: 0,
+      idleStreak: 0,
+      online: false,
+      cpuPct: 0,
+      httpSeen: false,
+    });
+  }
+  dispatchEvent = typeof onEvent === "function" ? onEvent : post;
+
+  log(`通用采集器启动 (machineId=${machineId})`);
+  log(`监控 ${fps.length} 个指纹：${fps.map((f) => f.label).join("、")}`);
+  log(typeof onEvent === "function" ? "内嵌模式：事件直送主进程 ingest()" : `上报 -> ${config.agentUrl}（回退 ${config.fallbackUrl}）`);
+
+  const timers = [
+    setInterval(tick, poll.process),
+    setInterval(httpTick, poll.http),
+    setInterval(fastTick, 1000) // 1s 快采样 runner CPU，抓 GPU 推理 prefill 尖峰
+  ];
+  tick(); // 首次立即采一次
+  httpTick();
+  fastTick();
+
+  // 自动发现：SEA 下 process.execPath 是 exe，spawn 它跑 .mjs 会重启 server，故仅 CLI/开发态启用。
+  if (autoDiscover && !isSeaBuild) {
+    try {
+      const scanPath = path.join(__dirname, "..", "scripts", "scan-ai-tools.mjs");
+      if (fs.existsSync(scanPath)) {
+        spawn(process.execPath, [scanPath, "--report"], { stdio: "ignore", windowsHide: true, detached: false });
+        log("已触发自动发现（scan-ai-tools --report）");
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return {
+    stop() {
+      for (const t of timers) clearInterval(t);
+    }
+  };
 }
 
 // ---------- 周期：进程 / 窗口 / CPU ----------
@@ -404,7 +444,7 @@ function apply(fp, target, st) {
 
 async function report(fp, t) {
   log(`[${fp.label}] -> ${t.state} | ${t.summary}`);
-  post({
+  const ev = {
     source: fp.source,
     instanceId: `${fp.source}::${machineId}`,
     sourceLabel: fp.label,
@@ -417,7 +457,12 @@ async function report(fp, t) {
     detail: t.detail || "",
     severity: t.severity || "info",
     raw: t.raw || {},
-  });
+  };
+  try {
+    await dispatchEvent(ev);
+  } catch {
+    /* 单条上报失败不影响采集 */
+  }
 }
 
 async function post(ev) {
@@ -474,8 +519,12 @@ try {
 } catch {}
 [PSCustomObject]@{ processes=$procs; cpu=$cpu; fg=$fg } | ConvertTo-Json -Compress -Depth 5`;
 
-// 所有顶层 const 已就绪，启动采集
-main();
+// 作为独立 CLI 运行（node adapters/desktop-collector.mjs）：走 HTTP 上报。
+// SEA / 被主进程 import 时不触发（process.argv[1] 为空或指向 exe），避免双启。
+const __isCollectorMain = __thisFile && process.argv[1] && path.resolve(process.argv[1]) === __thisFile;
+if (__isCollectorMain) {
+  startCollector({ autoDiscover: true });
+}
 
 // ---------- 指纹匹配 ----------
 function matchFp(fp, p) {
@@ -518,25 +567,25 @@ function norm(x) {
   return Array.isArray(x) ? x : [x];
 }
 
-function loadConfig() {
+function loadConfig(cfgPath) {
   try {
-    return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
+    return JSON.parse(fs.readFileSync(cfgPath, "utf8"));
   } catch (e) {
-    console.error("[CodeStatus] 无法读取指纹库 " + CONFIG_PATH + "：" + e.message);
-    process.exit(1);
+    // 抛出而非 process.exit：内嵌进主进程时退出会拖死整个 server，交调用方 try/catch。
+    throw new Error("无法读取指纹库 " + cfgPath + "：" + e.message);
   }
 }
 
-function loadMachineId() {
+function loadMachineId(idPath) {
   try {
     fs.mkdirSync(APPDATA_DIR, { recursive: true });
-    if (fs.existsSync(ID_PATH)) return JSON.parse(fs.readFileSync(ID_PATH, "utf8")).id;
+    if (fs.existsSync(idPath)) return JSON.parse(fs.readFileSync(idPath, "utf8")).id;
   } catch {
     /* ignore */
   }
   const id = crypto.randomUUID();
   try {
-    fs.writeFileSync(ID_PATH, JSON.stringify({ id }, null, 2));
+    fs.writeFileSync(idPath, JSON.stringify({ id }, null, 2));
   } catch {
     /* ignore */
   }

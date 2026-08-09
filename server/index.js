@@ -6,10 +6,11 @@ import { WebSocketServer, WebSocket } from "ws";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { Bonjour } from "bonjour-service";
 import selfsigned from "selfsigned";
 import { startTranscriptWatchers } from "./transcript-watcher.js";
+import { startCollector } from "../adapters/desktop-collector.mjs";
 import { maybeNotify, dispatch, mergeNotifySettings, DEFAULT_NOTIFY_SETTINGS } from "./notifier.js";
 // 是否以单文件可执行(打包成的 .exe)方式运行：可执行文件名不是 node 即视为打包版
 const isSeaBuild = !/^node(\.exe)?$/i.test(path.basename(process.execPath || "node"));
@@ -67,7 +68,14 @@ const toolLabels = {
   codex: "Codex",
   vscode: "VS Code",
   cursor: "Cursor",
-  generic: "通用监控"
+  generic: "通用监控",
+  // 采集器监控的常用 AI 工具（作为离线占位卡；运行后由采集器事件替换为实时状态）
+  "opencode-desktop": "OpenCode",
+  "kimi-desktop": "Kimi 桌面版",
+  comfyui: "ComfyUI",
+  ollama: "Ollama",
+  pycharm: "PyCharm",
+  autoglm: "AutoGLM"
 };
 
 const initialTools = Object.keys(toolLabels).reduce((acc, source) => {
@@ -262,12 +270,15 @@ const requestHandler = async (req, res) => {
     let rate = Number(body.rate);
     if (!Number.isFinite(rate)) rate = 0;
     rate = Math.max(-50, Math.min(100, Math.round(rate)));
+    let volume = Number(body.volume);
+    if (!Number.isFinite(volume)) volume = 1;
+    volume = Math.max(0, Math.min(1, volume));
 
-    const cacheKey = `${voice}|${rate}|${text}`;
+    const cacheKey = `${voice}|${rate}|${volume}|${text}`;
     let audio = ttsCache.get(cacheKey);
     if (!audio) {
       try {
-        audio = await synthesizeWithRetry(text, voice, rate);
+        audio = await synthesizeWithRetry(text, voice, rate, volume);
       } catch (error) {
         return sendJson(res, { error: `TTS 失败：${error.message}` }, 502);
       }
@@ -286,6 +297,19 @@ const requestHandler = async (req, res) => {
     return res.end(audio);
   }
 
+  if (req.method === "POST" && url.pathname === "/api/open") {
+    if (!isLoopback(req)) return sendJson(res, { error: "Desktop access required" }, 403);
+    openBrowser(`http://127.0.0.1:${FRONTEND_PORT}`);
+    return sendJson(res, { ok: true });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/shutdown") {
+    if (!isLoopback(req)) return sendJson(res, { error: "Desktop access required" }, 403);
+    sendJson(res, { ok: true });
+    setImmediate(gracefulShutdown);
+    return;
+  }
+
   return sendJson(res, { error: "Not found" }, 404);
 };
 
@@ -298,7 +322,7 @@ function ttsGenerateSecMsGec() {
   return crypto.createHash("sha256").update(`${Math.floor(ticks)}${TTS_TRUSTED_TOKEN}`).digest("hex").toUpperCase();
 }
 
-function ttsBuildSsml(text, voice, ratePercent) {
+function ttsBuildSsml(text, voice, ratePercent, volume = 1) {
   const safe = String(text)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -306,15 +330,16 @@ function ttsBuildSsml(text, voice, ratePercent) {
     .replace(/"/g, "&quot;");
   const lang = voice.split("-").slice(0, 2).join("-");
   const rate = `${ratePercent >= 0 ? "+" : ""}${ratePercent}%`;
-  return `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="${lang}"><voice name="${voice}"><prosody rate="${rate}">${safe}</prosody></voice></speak>`;
+  const vol = `${Math.round(Math.max(0, Math.min(1, volume)) * 100)}`;
+  return `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="${lang}"><voice name="${voice}"><prosody rate="${rate}" volume="${vol}">${safe}</prosody></voice></speak>`;
 }
 
 // 网络偶发抖动（TLS 断开等）时重试一次，提升手机端播报成功率
-async function synthesizeWithRetry(text, voice, rate, attempts = 2) {
+async function synthesizeWithRetry(text, voice, rate, volume, attempts = 2) {
   let lastError;
   for (let i = 0; i < attempts; i += 1) {
     try {
-      const audio = await synthesizeEdgeTts(text, voice, rate);
+      const audio = await synthesizeEdgeTts(text, voice, rate, volume);
       if (audio?.length) return audio;
       lastError = new Error("空音频");
     } catch (error) {
@@ -324,7 +349,7 @@ async function synthesizeWithRetry(text, voice, rate, attempts = 2) {
   throw lastError || new Error("TTS 失败");
 }
 
-function synthesizeEdgeTts(text, voice, ratePercent = 0) {
+function synthesizeEdgeTts(text, voice, ratePercent = 0, volume = 1) {
   return new Promise((resolve, reject) => {
     const connectionId = crypto.randomUUID().replace(/-/g, "");
     const wsUrl = `${TTS_WSS_BASE}&Sec-MS-GEC=${ttsGenerateSecMsGec()}&Sec-MS-GEC-Version=${TTS_GEC_VERSION}&ConnectionId=${connectionId}`;
@@ -352,7 +377,7 @@ function synthesizeEdgeTts(text, voice, ratePercent = 0) {
       }
       fn();
     };
-    timer = setTimeout(() => finish(() => reject(new Error("Edge TTS 超时"))), 15000);
+    timer = setTimeout(() => finish(() => reject(new Error("Edge TTS 超时"))), 5000);
 
     ws.on("open", () => {
       ws.send(
@@ -370,7 +395,7 @@ function synthesizeEdgeTts(text, voice, ratePercent = 0) {
       );
       const requestId = crypto.randomUUID().replace(/-/g, "");
       ws.send(
-        `X-RequestId:${requestId}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:${new Date().toISOString()}\r\nPath:ssml\r\n\r\n${ttsBuildSsml(text, voice, ratePercent)}`
+        `X-RequestId:${requestId}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:${new Date().toISOString()}\r\nPath:ssml\r\n\r\n${ttsBuildSsml(text, voice, ratePercent, volume)}`
       );
     });
 
@@ -407,10 +432,19 @@ const websocketServers = [];
 let certificateInfo = null;
 let httpsServer = null;
 const pairingSessions = new Map();
+// 后台常驻相关：托盘子进程（PowerShell NotifyIcon）与采集器停止函数，退出时统一回收。
+let trayChild = null;
+let collectorStop = null;
 
 // 启动流程（包装为函数，避免顶层 await，以便打包成单文件 exe）
 async function bootstrap() {
   setupWebSocket(server);
+
+  // 便携版：尽早启动托盘并隐藏控制台（后台常驻），日志落盘 data/server.log 便于排查。
+  if (isSeaBuild) {
+    if (process.env.CODESTATUS_LOG_FILE !== "0") redirectLogs();
+    trayChild = startSystemTray();
+  }
 
   httpsServer = await createHttpsServer();
   if (httpsServer) setupWebSocket(httpsServer);
@@ -438,6 +472,19 @@ async function bootstrap() {
         console.warn(`[watcher] 日志监听启动失败：${error.message}`);
       }
     }
+    // 内嵌采集器：监控 ComfyUI / Ollama / OpenCode / Kimi / PyCharm 等 AI 工具，事件直送 ingest（免 HTTP）。
+    // 便携版读取 exe 同级 config/fingerprints.json；自动发现在 SEA 下关闭（见 desktop-collector.mjs）。
+    if (process.env.CODESTATUS_DISABLE_COLLECTOR !== "1") {
+      try {
+        collectorStop = startCollector({
+          fingerprintsPath: path.join(BASE_DIR, "config", "fingerprints.json"),
+          onEvent: (event) => ingest(event),
+          autoDiscover: !isSeaBuild
+        });
+      } catch (error) {
+        console.warn(`[collector] 采集器启动失败：${error.message}`);
+      }
+    }
     // 主服务起来后即可打开浏览器（前端可能由本进程或 vite 提供）
     if (isSeaBuild) {
       openBrowser(`http://127.0.0.1:${FRONTEND_PORT}`);
@@ -461,6 +508,49 @@ async function bootstrap() {
     });
   }
 }
+
+// 干净退出：托盘子进程 -> 采集器 -> mDNS -> WebSocket/HTTP，最后 process.exit。
+// 由托盘「退出软件」(POST /api/shutdown) 或 SIGINT/SIGTERM 触发。
+function gracefulShutdown() {
+  console.log("[shutdown] 收到退出请求，正在关闭…");
+  try {
+    trayChild?.kill();
+  } catch {
+    // best-effort
+  }
+  try {
+    collectorStop?.();
+  } catch {
+    // best-effort
+  }
+  try {
+    publishedService?.stop?.();
+    publishedService = null;
+  } catch {
+    // best-effort
+  }
+  for (const wss of websocketServers) {
+    try {
+      wss.close();
+    } catch {
+      // best-effort
+    }
+  }
+  try {
+    server.close();
+  } catch {
+    // best-effort
+  }
+  try {
+    httpsServer?.close();
+  } catch {
+    // best-effort
+  }
+  setTimeout(() => process.exit(0), 500);
+}
+
+process.on("SIGINT", () => gracefulShutdown());
+process.on("SIGTERM", () => gracefulShutdown());
 
 function openBrowser(target) {
   try {
@@ -511,6 +601,68 @@ function ensureDesktopShortcut() {
       if (err) console.log(`[快捷方式] 创建跳过/失败：${err.message || err.code}`);
     }
   );
+}
+
+// 任务栏托盘 PowerShell 脚本（便携版后台常驻）：
+//  1) 隐藏父进程(exe)的控制台窗口（PS 子进程继承同一控制台，GetConsoleWindow 返回的即 exe 的控制台）；
+//  2) NotifyIcon + 右键菜单「打开软件页面 / 退出软件」，菜单动作回打本机 HTTP 端点；
+//  3) 父进程看门狗：exe 一旦消失（崩溃/被杀/端口占用自退），托盘自动消失，避免残留图标。
+// 用 -EncodedCommand（UTF-16LE base64）传递，规避控制台代码页对中文的乱码。
+const TRAY_PS_SCRIPT = `
+$ErrorActionPreference='Continue'
+Add-Type -Namespace CStat -Name Win -MemberDefinition '[DllImport("kernel32.dll")] public static extern System.IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr hWnd, int n);'
+if($env:CODESTATUS_NO_HIDE -ne '1'){
+  $h=[CStat.Win]::GetConsoleWindow()
+  if($h -ne [System.IntPtr]::Zero){ [void][CStat.Win]::ShowWindow($h,0) }
+}
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$exePid=$env:CODESTATUS_EXE_PID
+$base='http://127.0.0.1:4317'
+$icon=New-Object System.Windows.Forms.NotifyIcon
+try{ $icon.Icon=[System.Drawing.Icon]::ExtractAssociatedIcon($env:CODESTATUS_EXE) }catch{ try{ $icon.Icon=[System.Drawing.SystemIcons]::Application }catch{} }
+$icon.Text='CodeStatus 监控'
+$icon.Visible=$true
+$menu=New-Object System.Windows.Forms.ContextMenuStrip
+$open=$menu.Items.Add('打开软件页面')
+$quit=$menu.Items.Add('退出软件')
+$open.Add_Click({ try{ Invoke-WebRequest -UseBasicParsing -Method POST -Uri ($base+'/api/open') -TimeoutSec 3 }catch{} })
+$quit.Add_Click({ try{ Invoke-WebRequest -UseBasicParsing -Method POST -Uri ($base+'/api/shutdown') -TimeoutSec 3 }catch{}; $icon.Visible=$false; Start-Sleep -Milliseconds 600; try{ Stop-Process -Id $exePid -Force -ErrorAction SilentlyContinue }catch{}; [System.Windows.Forms.Application]::Exit() })
+$icon.ContextMenuStrip=$menu
+$watch=New-Object System.Windows.Forms.Timer
+$watch.Interval=2000
+$watch.Add_Tick({ try{ $null=Get-Process -Id $exePid -ErrorAction Stop }catch{ $icon.Visible=$false; $watch.Stop(); [System.Windows.Forms.Application]::Exit() } })
+$watch.Start()
+[System.Windows.Forms.Application]::Run()
+`;
+
+// 启动托盘（仅便携版）。返回 PS 子进程，退出时由 gracefulShutdown 回收。
+function startSystemTray() {
+  if (process.platform !== "win32" || !isSeaBuild) return null;
+  const encoded = Buffer.from(TRAY_PS_SCRIPT, "utf16le").toString("base64");
+  const child = spawn(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+    {
+      windowsHide: true,
+      env: { ...process.env, CODESTATUS_EXE: process.execPath, CODESTATUS_EXE_PID: String(process.pid) }
+    }
+  );
+  child.on("error", (err) => console.warn(`[tray] 托盘启动失败：${err.message}`));
+  return child;
+}
+
+// 控制台被托盘隐藏后，把 stdout/stderr 落盘到 data/server.log，便于排查启动问题。
+function redirectLogs() {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const stream = fs.createWriteStream(path.join(DATA_DIR, "server.log"), { flags: "a" });
+    process.stdout.write = (chunk, ...rest) => stream.write(chunk, ...rest);
+    process.stderr.write = (chunk, ...rest) => stream.write(chunk, ...rest);
+    stream.write(`\n===== CodeStatus 启动 ${new Date().toISOString()} =====\n`);
+  } catch {
+    // 日志重定向失败不影响运行
+  }
 }
 
 bootstrap();
@@ -1073,6 +1225,8 @@ function loadSettings() {
     devices: [],
     revokedDevices: [],
     privacyMode: false,
+    // 按软件（source）覆盖全局音色/音量/语速；空对象=全部走全局。形如 { "comfyui": { voice, volume, rate } }
+    voiceOverrides: {},
     notify: DEFAULT_NOTIFY_SETTINGS
   };
   try {
@@ -1125,6 +1279,7 @@ function publicSettings() {
       fingerprint256: certificateInfo?.fingerprint256 || "",
       note: httpsServer ? "使用本机自签名证书，首次访问需要信任证书。" : "HTTPS 通道未启动。"
     },
+    voiceOverrides: store.settings.voiceOverrides || {},
     devices: store.settings.devices
       .map(publicDevice),
     revokedDevices: (store.settings.revokedDevices || []).map((device) => ({

@@ -51,6 +51,29 @@ const stateMeta = {
   paused: { label: "已暂停", tone: "neutral", icon: PauseCircle, pet: "idle" }
 };
 
+// 播报分桶：开始/进行中/完成/失败/打断各报一次，同桶不重复；空闲/离线/暂停不报。
+function announceBucket(state) {
+  switch (state) {
+    case "prompt_submitted":
+    case "thinking":
+      return "start";
+    case "using_tool":
+    case "writing_code":
+    case "running_command":
+    case "running_tests":
+      return "progress";
+    case "completed":
+      return "completed";
+    case "failed":
+      return "failed";
+    case "waiting_permission":
+    case "waiting_user":
+      return "interrupt";
+    default:
+      return "other";
+  }
+}
+
 const simulations = [
   { source: "claude-code", state: "thinking", message: "Claude Code 正在分析项目结构", title: "Claude Code 正在思考" },
   { source: "claude-code", state: "writing_code", message: "正在修改 src/App.jsx", title: "Claude Code 正在写代码" },
@@ -94,10 +117,15 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [ttsVoice, setTtsVoice] = useState(() => {
     const stored = window.localStorage.getItem("codestatus-tts-voice");
-    return stored === null ? "zh-CN-XiaoxiaoNeural" : stored;
+    // 默认 "" = 自动取本机第一个中文音色（离线可靠）；云端音色需手动开「在线 HD」。
+    return stored === null ? "" : stored;
   });
   const [ttsRate, setTtsRate] = useState(() => Number(window.localStorage.getItem("codestatus-tts-rate") || 0));
   const [voiceList, setVoiceList] = useState([]);
+  const [localVoices, setLocalVoices] = useState([]);
+  const [ttsCloudEnabled, setTtsCloudEnabled] = useState(
+    () => window.localStorage.getItem("codestatus-tts-cloud") === "1"
+  );
   const activeToolRef = useRef(null);
   const lastSpokenByInstance = useRef(new Map());
   const speechQueue = useRef([]);
@@ -106,6 +134,10 @@ export default function App() {
   const wakeLock = useRef(null);
   const ttsVoiceRef = useRef(ttsVoice);
   const ttsRateRef = useRef(ttsRate);
+  const ttsCloudEnabledRef = useRef(ttsCloudEnabled);
+  const localVoicesRef = useRef([]);
+  const cloudVoiceIdsRef = useRef(new Set());
+  const voiceOverridesRef = useRef({});
   const currentAudio = useRef(null);
 
   const agentBase = useMemo(() => {
@@ -236,7 +268,10 @@ export default function App() {
       socket.onmessage = (message) => {
         const payload = JSON.parse(message.data);
         if (payload.status) setStatus(payload.status);
-        if (payload.settings) setPairing((current) => ({ ...(current || {}), ...payload.settings }));
+        if (payload.settings) {
+          setPairing((current) => ({ ...(current || {}), ...payload.settings }));
+          if (payload.settings.voiceOverrides) voiceOverridesRef.current = payload.settings.voiceOverrides;
+        }
       };
     };
 
@@ -255,19 +290,43 @@ export default function App() {
     ttsRateRef.current = ttsRate;
   }, [ttsRate]);
 
+  useEffect(() => {
+    ttsCloudEnabledRef.current = ttsCloudEnabled;
+  }, [ttsCloudEnabled]);
+
   // 拉取电脑端可用的云端音色列表
   useEffect(() => {
     let active = true;
     fetch(`${agentBase}/api/tts/voices`, { headers: apiHeaders })
       .then((response) => (response.ok ? response.json() : null))
       .then((data) => {
-        if (active && Array.isArray(data?.voices)) setVoiceList(data.voices);
+        if (active && Array.isArray(data?.voices)) {
+          setVoiceList(data.voices);
+          cloudVoiceIdsRef.current = new Set(data.voices.map((voice) => voice.id));
+        }
       })
       .catch(() => {});
     return () => {
       active = false;
     };
   }, [agentBase, apiHeaders]);
+
+  // 本机离线音色（speechSynthesis）：Win11 自带神经网络音色，境内无需联网即可用，是默认引擎。
+  useEffect(() => {
+    if (!window.speechSynthesis) return undefined;
+    const load = () => {
+      const list = window.speechSynthesis.getVoices() || [];
+      if (list.length) {
+        setLocalVoices(list);
+        localVoicesRef.current = list;
+      }
+    };
+    load();
+    window.speechSynthesis.onvoiceschanged = load;
+    return () => {
+      if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = null;
+    };
+  }, []);
 
   // 正在运行 / 已连接的工具集合，按稳定 key 排序，用于顶部轮换
   const rotatingTools = useMemo(() => {
@@ -313,7 +372,7 @@ export default function App() {
     if (!speechEnabled || !repeatMinutes) return undefined;
     const timer = window.setInterval(() => {
       const tool = activeToolRef.current;
-      if (tool) enqueueSpeak(briefSpeechForStatus(tool));
+      if (tool) enqueueSpeak({ text: briefSpeechForStatus(tool), source: tool.source });
     }, repeatMinutes * 60000);
     return () => window.clearInterval(timer);
   }, [speechEnabled, repeatMinutes]);
@@ -337,13 +396,14 @@ export default function App() {
     if (!speechEnabled || !status?.recentEvents?.length || !window.speechSynthesis) return;
     const event = status.recentEvents[0];
     if (!event?.eventId || event.state === "offline" || event.state === "idle") return; // 空闲不播报，只在运行/需要处理时才说话
-    // 按软件（实例）分别记录；只在「主标题分组」(tone) 变化时播报，
-    // 同属工作中的运行命令/写代码/调用工具/测试之间切换不再重复播报。
+    // 按软件（实例）分桶播报：开始/进行中/完成/失败/打断各报一次，同桶内切换不重复。
     const instance = event.instanceId || event.source || "task";
-    const category = stateMeta[event.state]?.tone || event.state;
-    if (lastSpokenByInstance.current.get(instance) === category) return;
-    lastSpokenByInstance.current.set(instance, category);
-    enqueueSpeak(announcementForEvent(event));
+    const bucket = announceBucket(event.state);
+    if (bucket === "other") return; // 空闲/离线/暂停不播报（上方已挡 offline/idle）
+    const dedupKey = `${instance}::${bucket}`;
+    if (lastSpokenByInstance.current.get(instance) === dedupKey) return;
+    lastSpokenByInstance.current.set(instance, dedupKey);
+    enqueueSpeak({ text: announcementForEvent(event), source: event.source });
   }, [status, speechEnabled]);
 
   const answer = useMemo(() => makeAnswer(query, activeTool, status), [query, activeTool, status]);
@@ -409,15 +469,6 @@ export default function App() {
     setConnectionDetail("本机配对信息已清除，请重新扫码");
   }
 
-  function speak(text) {
-    if (!window.speechSynthesis) return;
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = "zh-CN";
-    utterance.rate = 1;
-    window.speechSynthesis.speak(utterance);
-  }
-
   function toggleSpeechEnabled() {
     setSpeechEnabled((enabled) => {
       const next = !enabled;
@@ -451,24 +502,36 @@ export default function App() {
     window.localStorage.setItem("codestatus-tts-rate", String(rate));
   }
 
-  function enqueueSpeak(text) {
+  function enqueueSpeak(input) {
+    const isObj = input && typeof input === "object";
+    const text = isObj ? input.text : input;
     if (!text) return;
-    speechQueue.current.push(text);
+    const source = isObj ? input.source ?? null : null;
+    const opts = isObj ? input.opts ?? null : null;
+    speechQueue.current.push({ text, source, opts });
     speechQueue.current = speechQueue.current.slice(-8);
     drainSpeechQueue();
   }
 
   async function drainSpeechQueue() {
     if (speaking.current || !speechQueue.current.length) return;
-    const text = speechQueue.current.shift();
+    const item = speechQueue.current.shift();
     const runId = speechRunId.current;
     speaking.current = true;
     try {
-      // 选了云端音色就先用电脑端合成，失败再回退到手机自带语音
-      if (ttsVoiceRef.current) {
-        await playViaAgent(text, runId).catch(() => playViaSystem(text, runId));
+      // 按软件覆盖解析音色/音量/语速：调用方传入 > 该软件覆盖 > 全局
+      const vo = (item.source && voiceOverridesRef.current[item.source]) || {};
+      const voice = item.opts?.voice ?? vo.voice ?? ttsVoiceRef.current;
+      const rate = item.opts?.rate ?? (vo.rate ?? ttsRateRef.current);
+      const volume = item.opts?.volume ?? (vo.volume ?? 1);
+      const useCloud = cloudVoiceIdsRef.current.has(voice) && ttsCloudEnabledRef.current;
+      if (useCloud) {
+        // 云端在线 HD：失败（含超时）静默回退本机音色，保证总能发声
+        await playViaAgent(item.text, voice, rate, volume, runId).catch(() =>
+          playViaSystem(item.text, runId, voice, rate, volume)
+        );
       } else {
-        await playViaSystem(text, runId);
+        await playViaSystem(item.text, runId, voice, rate, volume);
       }
     } catch {
       // 单条失败不阻塞队列
@@ -478,11 +541,12 @@ export default function App() {
     drainSpeechQueue();
   }
 
-  function playViaAgent(text, runId) {
+  function playViaAgent(text, voice, rate, volume, runId) {
     return fetch(`${agentBase}/api/tts`, {
       method: "POST",
       headers: apiHeaders,
-      body: JSON.stringify({ text, voice: ttsVoiceRef.current, rate: ttsRateRef.current })
+      body: JSON.stringify({ text, voice, rate, volume }),
+      signal: AbortSignal.timeout(3500)
     })
       .then((response) => {
         if (!response.ok) throw new Error(`tts ${response.status}`);
@@ -494,6 +558,7 @@ export default function App() {
             if (runId !== speechRunId.current) return resolve();
             const objectUrl = URL.createObjectURL(blob);
             const audio = new Audio(objectUrl);
+            audio.volume = Math.max(0, Math.min(1, volume ?? 1));
             currentAudio.current = audio;
             const cleanup = () => {
               URL.revokeObjectURL(objectUrl);
@@ -515,12 +580,24 @@ export default function App() {
       );
   }
 
-  function playViaSystem(text, runId) {
+  function playViaSystem(text, runId, voice, rate, volume) {
     return new Promise((resolve) => {
       if (!window.speechSynthesis || runId !== speechRunId.current) return resolve();
       const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = "zh-CN";
-      utterance.rate = 1;
+      // 核心修复：按所选音色挑选本机 SpeechSynthesisVoice（"" → 第一个中文音色）。
+      // 否则浏览器永远用系统默认机械音——这正是"换音色不生效"的根因。
+      const pick =
+        (voice && localVoicesRef.current.find((v) => v.voiceURI === voice || v.name === voice)) ||
+        localVoicesRef.current.find((v) => /^zh/i.test(v.lang)) ||
+        null;
+      if (pick) {
+        utterance.voice = pick;
+        utterance.lang = pick.lang || "zh-CN";
+      } else {
+        utterance.lang = "zh-CN";
+      }
+      utterance.rate = Math.max(0.1, Math.min(3, 1 + (Number(rate) || 0) / 100));
+      utterance.volume = Math.max(0, Math.min(1, Number(volume) || 1));
       utterance.onend = () => resolve();
       utterance.onerror = () => resolve();
       window.speechSynthesis.speak(utterance);
@@ -529,7 +606,7 @@ export default function App() {
 
   function speakCurrent() {
     if (!activeTool) return;
-    enqueueSpeak(briefSpeechForStatus(activeTool));
+    enqueueSpeak({ text: briefSpeechForStatus(activeTool), source: activeTool?.source });
   }
 
   async function requestWakeLock() {
@@ -563,7 +640,7 @@ export default function App() {
   function startVoiceDialog() {
     const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!Recognition) {
-      enqueueSpeak(briefSpeechForStatus(activeTool));
+      enqueueSpeak({ text: briefSpeechForStatus(activeTool), source: activeTool?.source });
       return;
     }
 
@@ -575,9 +652,9 @@ export default function App() {
     recognition.onresult = (event) => {
       const text = event.results?.[0]?.[0]?.transcript || "现在在做什么";
       setQuery(text);
-      enqueueSpeak(makeVoiceAnswer(text, activeTool, status));
+      enqueueSpeak({ text: makeVoiceAnswer(text, activeTool, status), source: activeTool?.source });
     };
-    recognition.onerror = () => enqueueSpeak(briefSpeechForStatus(activeTool));
+    recognition.onerror = () => enqueueSpeak({ text: briefSpeechForStatus(activeTool), source: activeTool?.source });
     recognition.onend = () => setListening(false);
     recognition.start();
   }
@@ -637,6 +714,15 @@ export default function App() {
 
         <NotificationPanel agentBase={agentBase} apiHeaders={apiHeaders} />
 
+        <VoiceOverridesPanel
+          agentBase={agentBase}
+          apiHeaders={apiHeaders}
+          status={status}
+          localVoices={localVoices}
+          cloudVoices={voiceList}
+          cloudEnabled={ttsCloudEnabled}
+        />
+
         <PairingPanel
           pairing={pairing}
           network={network}
@@ -682,13 +768,35 @@ export default function App() {
           <div className="speech-row">
             <span>播报音色</span>
             <select className="voice-select" value={ttsVoice} onChange={(event) => changeVoice(event.target.value)}>
-              <option value="">手机自带（无网兜底）</option>
-              {voiceList.map((voice) => (
-                <option key={voice.id} value={voice.id}>
-                  {voice.label}
-                </option>
-              ))}
+              <option value="">本机默认（离线，推荐）</option>
+              {localVoices
+                .filter((voice) => /^zh/i.test(voice.lang))
+                .map((voice) => (
+                  <option key={voice.voiceURI} value={voice.voiceURI}>
+                    {voice.name}
+                  </option>
+                ))}
+              {ttsCloudEnabled &&
+                voiceList.map((voice) => (
+                  <option key={voice.id} value={voice.id}>
+                    {voice.label}（在线 HD）
+                  </option>
+                ))}
             </select>
+          </div>
+          <div className="speech-row">
+            <span>在线 HD 音色</span>
+            <button
+              className={ttsCloudEnabled ? "chip active" : "chip"}
+              onClick={() => {
+                const next = !ttsCloudEnabled;
+                setTtsCloudEnabled(next);
+                window.localStorage.setItem("codestatus-tts-cloud", next ? "1" : "0");
+              }}
+              title="在线高清音色需联网，境内可能要代理；默认关闭以保证离线可用"
+            >
+              {ttsCloudEnabled ? "已开启" : "已关闭"}
+            </button>
           </div>
           <div className="speech-row">
             <span>语速</span>
@@ -715,7 +823,7 @@ export default function App() {
               className="chip"
               onClick={() => {
                 stopSpeech();
-                enqueueSpeak("你好，我是你的代码状态播报助手，现在正在写代码。");
+                enqueueSpeak({ text: "你好，我是你的代码状态播报助手，现在正在写代码。" });
               }}
             >
               试听当前音色
@@ -723,7 +831,7 @@ export default function App() {
           </div>
           <div className="query-box">
             <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="例如：Claude 现在在做什么？" />
-            <button className="primary-button" onClick={() => enqueueSpeak(voiceAnswer)}>
+            <button className="primary-button" onClick={() => enqueueSpeak({ text: voiceAnswer, source: activeTool?.source })}>
               <Volume2 size={17} />
               <span>回答</span>
             </button>
@@ -1223,6 +1331,137 @@ function NotificationPanel({ agentBase, apiHeaders }) {
           ))}
         </div>
       ) : null}
+    </section>
+  );
+}
+
+// 按软件（source）设置独立音色/音量/语速，避免多软件播报串台、听不清。
+// 持久化到 settings.voiceOverrides = { "comfyui": { voice, volume, rate } }；留空=跟随全局。
+function VoiceOverridesPanel({ agentBase, apiHeaders, status, localVoices, cloudVoices, cloudEnabled }) {
+  const [overrides, setOverrides] = useState(null);
+  const [saveState, setSaveState] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    fetch(`${agentBase}/api/settings`, { headers: apiHeaders })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        if (active) setOverrides(data?.voiceOverrides || {});
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [agentBase, apiHeaders]);
+
+  const sources = useMemo(() => {
+    const seen = new Map();
+    for (const tool of status?.tools || []) {
+      if (tool.isPlaceholder) continue;
+      const key = tool.source || "generic";
+      if (!seen.has(key)) seen.set(key, tool.sourceLabel || tool.label || key);
+    }
+    return Array.from(seen, ([source, label]) => ({ source, label }));
+  }, [status]);
+
+  if (overrides === null || !sources.length) return null;
+
+  const get = (source) => overrides[source] || {};
+  const setField = (source, field, value) => {
+    setOverrides((current) => ({
+      ...current,
+      [source]: { ...(current[source] || {}), [field]: value }
+    }));
+    setSaveState("");
+  };
+
+  async function save() {
+    try {
+      const response = await fetch(`${agentBase}/api/settings`, {
+        method: "POST",
+        headers: apiHeaders,
+        body: JSON.stringify({ voiceOverrides: overrides })
+      });
+      setSaveState(response.ok ? "已保存" : "保存失败");
+    } catch {
+      setSaveState("保存失败");
+    }
+  }
+
+  return (
+    <section className="panel notify-panel">
+      <div className="panel-title">
+        <Mic2 size={18} />
+        <h2>按软件播报设置</h2>
+      </div>
+      <p className="answer">为每个软件单独设置音色/音量/语速；留空则跟随全局，未列出的软件走全局设置。</p>
+      {sources.map(({ source, label }) => {
+        const cur = get(source);
+        return (
+          <div key={source} className="voice-override-row">
+            <div className="speech-row">
+              <span>{label}</span>
+              <select
+                className="voice-select"
+                value={cur.voice ?? ""}
+                onChange={(event) => setField(source, "voice", event.target.value)}
+              >
+                <option value="">跟随全局</option>
+                {localVoices
+                  .filter((voice) => /^zh/i.test(voice.lang))
+                  .map((voice) => (
+                    <option key={voice.voiceURI} value={voice.voiceURI}>
+                      {voice.name}
+                    </option>
+                  ))}
+                {cloudEnabled &&
+                  (cloudVoices || []).map((voice) => (
+                    <option key={voice.id} value={voice.id}>
+                      {voice.label}（在线 HD）
+                    </option>
+                  ))}
+              </select>
+            </div>
+            <div className="speech-row">
+              <span>音量</span>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.1}
+                value={cur.volume ?? 1}
+                onChange={(event) => setField(source, "volume", Number(event.target.value))}
+              />
+              <span>{Math.round((cur.volume ?? 1) * 100)}%</span>
+            </div>
+            <div className="speech-row">
+              <span>语速</span>
+              <div className="chip-group">
+                {[
+                  { label: "慢", value: -25 },
+                  { label: "正常", value: 0 },
+                  { label: "快", value: 25 },
+                  { label: "更快", value: 50 }
+                ].map((option) => (
+                  <button
+                    key={option.value}
+                    className={(cur.rate ?? 0) === option.value ? "chip active" : "chip"}
+                    onClick={() => setField(source, "rate", option.value)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+      <div className="speech-row">
+        <button className="primary-button" onClick={save}>
+          保存
+        </button>
+        {saveState && <span className="answer">{saveState}</span>}
+      </div>
     </section>
   );
 }
