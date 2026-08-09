@@ -336,7 +336,7 @@ export default function App() {
   useEffect(() => {
     if (!speechEnabled || !status?.recentEvents?.length || !window.speechSynthesis) return;
     const event = status.recentEvents[0];
-    if (!event?.eventId || event.state === "offline") return;
+    if (!event?.eventId || event.state === "offline" || event.state === "idle") return; // 空闲不播报，只在运行/需要处理时才说话
     // 按软件（实例）分别记录；只在「主标题分组」(tone) 变化时播报，
     // 同属工作中的运行命令/写代码/调用工具/测试之间切换不再重复播报。
     const instance = event.instanceId || event.source || "task";

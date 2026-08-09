@@ -32,6 +32,14 @@ copyDir(path.join(root, "scripts", "install-claude-code-hooks.mjs"), path.join(d
 copyDir(path.join(root, "scripts", "install-codex-hooks.mjs"), path.join(desktopDir, "scripts", "install-codex-hooks.mjs"));
 copyDir(path.join(root, "adapters"), path.join(desktopDir, "adapters"));
 
+// 通用 AI 工具监控采集器：指纹库 + 自动发现 + 诊断/单测 + 启动/安装脚本
+copyDir(path.join(root, "config"), path.join(desktopDir, "config"));
+copyDir(path.join(root, "scripts", "scan-ai-tools.mjs"), path.join(desktopDir, "scripts", "scan-ai-tools.mjs"));
+copyDir(path.join(root, "scripts", "diag-opencode.mjs"), path.join(desktopDir, "scripts", "diag-opencode.mjs"));
+copyDir(path.join(root, "scripts", "test-eval-enhanced.mjs"), path.join(desktopDir, "scripts", "test-eval-enhanced.mjs"));
+copyDir(path.join(root, "scripts", "启动AI工具监控.cmd"), path.join(desktopDir, "启动AI工具监控.cmd"));
+copyDir(path.join(root, "scripts", "安装AI工具监控.cmd"), path.join(desktopDir, "安装AI工具监控.cmd"));
+
 writeFile(path.join(desktopDir, "安装VSCode扩展.cmd"), [
   "@echo off",
   "chcp 65001 >nul",
@@ -113,7 +121,60 @@ writeFile(path.join(appDir, "使用说明.md"), [
   "",
   "## 接入被监控的 Coding 工具（电脑端）",
   "- VS Code / Cursor / Kimi Code / MiniMax Code / GLM Code：双击 `电脑端监控/安装VSCode扩展.cmd`。",
-  "- Claude Code / Codex：双击对应 `安装*.cmd`（需本机已装 Node）。"
+  "- Claude Code / Codex：双击对应 `安装*.cmd`（需本机已装 Node）。",
+  "",
+  "## 接入更多 AI 工具（通用监控，桌面端）",
+  "",
+  "除了上面的「专用 adapter」，还有一个**通用监控采集器**，能自动监控一大批 AI 工具，装了哪个就监控哪个，无需逐个写代码。",
+  "",
+  "**一键安装（推荐）**：双击 `电脑端监控/安装AI工具监控.cmd` —— 会设开机自启并立即启动。",
+  "",
+  "**手动启动**：双击 `电脑端监控/启动AI工具监控.cmd`。后台最小化运行，日志在 `电脑端监控/data/collector.log`。",
+  "",
+  "### 能监控哪些",
+  "",
+  "| 类型 | 工具 | 信号精度 |",
+  "| --- | --- | --- |",
+  "| 本地出图/推理服务 | **ComfyUI**（出图中/队列/完成/报错）、**Ollama**（加载模型/正在推理）、LM Studio、SD WebUI | 准（HTTP API） |",
+  "| 桌面 AI 应用 | **OpenCode**、**Kimi 桌面版**、**AutoGLM**、**Pieces** | 弱（在线/前台/在忙） |",
+  "| JetBrains 全家桶 | PyCharm、WebStorm、IntelliJ、GoLand、RustRover、CLion、PhpStorm | 弱 |",
+  "| AI IDE fork | Windsurf、Trae、Zed、Void、PearAI | 弱 |",
+  "",
+  "> 「弱信号」只能判断工具**开着 / 窗口在前台 / CPU 占用高（在忙）**，做不到像 Claude Code 那样精确到「正在改哪个文件」。这是这些应用本身不开放内部状态导致的。",
+  "",
+  "### 改端口 / 开关某个工具",
+  "",
+  "编辑 `电脑端监控/config/fingerprints.json`：",
+  "",
+  "- ComfyUI 秋叶整合包默认端口写在 `8909`，如果你用的是标准版改成 `8188`；找到 `comfyui` 那条的 `httpProbe.baseUrl`。",
+  "- Ollama 默认 `11434`。",
+  "- 不想监控某工具：把它那条的 `\"enabled\": true` 改成 `false`。",
+  "- 改完**重启**「启动AI工具监控.cmd」生效。",
+  "",
+  "### 加一个新工具（指纹库可扩展）",
+  "",
+  "在 `fingerprints.json` 的 `fingerprints` 数组里照格式加一条，关键填进程名和窗口标题关键词即可：",
+  "",
+  "```json",
+  "{",
+  "  \"source\": \"my-tool\",",
+  "  \"label\": \"我的工具\",",
+  "  \"type\": \"desktop\",",
+  "  \"processNames\": [\"MyTool.exe\"],",
+  "  \"windowKeywords\": [\"MyTool\"],",
+  "  \"enabled\": true",
+  "}",
+  "```",
+  "",
+  "### 自动发现",
+  "",
+  "采集器每次启动会自动扫一遍本机（注册表 / 编辑器扩展 / 开始菜单 / 监听端口），把你装的 AI 工具识别出来。也可以手动跑一次看清单：",
+  "",
+  "```",
+  "node 电脑端监控/scripts/scan-ai-tools.mjs",
+  "```",
+  "",
+  "它会列出「已纳入监控 / 已被其他方式覆盖 / 未纳入」三类，未纳入的会提示你考虑加一条指纹。"
 ].join("\n"));
 
 console.log("\n完成。APP/ 目录已就绪。");
@@ -147,6 +208,9 @@ function resetDir(dir) {
 
 function copyDir(from, to) {
   fs.mkdirSync(path.dirname(to), { recursive: true });
+  // 先清掉目标（带重试，规避 Windows 上 cpSync 覆盖已存在文件时偶发的 spurious unlink 错误），
+  // 让 cpSync 写入全新目标。
+  if (fs.existsSync(to)) fs.rmSync(to, { recursive: true, force: true, retryDelay: 100, maxRetries: 3 });
   fs.cpSync(from, to, {
     recursive: true,
     filter: (source) => {
