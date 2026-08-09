@@ -55,7 +55,9 @@ run(process.execPath, ["--experimental-sea-config", configPath]);
 // 5. 复制 node 运行时并注入
 console.log("[5/6] create exe + inject...");
 const exePath = path.join(outDir, exeName);
-fs.rmSync(exePath, { force: true });
+// 带重试：规避 Windows Defender 扫描刚注入（签名损坏）的 exe 时的瞬时独占锁。
+// 注意：若旧 exe 正在运行，重试也无效——需先关闭它。
+fs.rmSync(exePath, { force: true, maxRetries: 5, retryDelay: 300 });
 fs.copyFileSync(process.execPath, exePath);
 run(process.execPath, [
   path.join(root, "node_modules", "postject", "dist", "cli.js"),

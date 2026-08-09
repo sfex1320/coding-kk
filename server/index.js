@@ -439,7 +439,11 @@ async function bootstrap() {
       }
     }
     // 主服务起来后即可打开浏览器（前端可能由本进程或 vite 提供）
-    if (isSeaBuild) openBrowser(`http://127.0.0.1:${FRONTEND_PORT}`);
+    if (isSeaBuild) {
+      openBrowser(`http://127.0.0.1:${FRONTEND_PORT}`);
+      // 便携版首次运行：在桌面放一个快捷方式（幂等，已存在则跳过）
+      ensureDesktopShortcut();
+    }
   });
 
   if (httpsServer) {
@@ -466,6 +470,47 @@ function openBrowser(target) {
   } catch {
     // 打开浏览器是尽力而为
   }
+}
+
+// 便携版首次运行：在桌面放一个快捷方式（已存在则跳过，幂等）。
+// 开发模式（node server）不创建，避免污染开发者桌面。
+function ensureDesktopShortcut() {
+  if (process.platform !== "win32" || !isSeaBuild) return;
+  const LNK = "CodeStatus 监控.lnk";
+  const exe = process.execPath;
+  const workDir = BASE_DIR;
+  // 便宜的本地存在性检查，避免每次启动都拉起 PowerShell（OneDrive 重定向也覆盖）
+  const home = os.homedir();
+  if (
+    fs.existsSync(path.join(home, "Desktop", LNK)) ||
+    fs.existsSync(path.join(home, "OneDrive", "Desktop", LNK))
+  ) {
+    return;
+  }
+  // 交给 PowerShell：用真实桌面路径（兼容 OneDrive 重定向 / 显示名本地化），自带 Test-Path 幂等。
+  // 用 -EncodedCommand（UTF-16LE base64）传中文，规避控制台代码页乱码。
+  const q = (s) => String(s).replace(/'/g, "''");
+  const ps = [
+    "$d=[Environment]::GetFolderPath('Desktop')",
+    "if(-not $d){exit 1}",
+    `$lnk=Join-Path $d '${q(LNK)}'`,
+    "if(Test-Path -LiteralPath $lnk){exit 0}",
+    "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($lnk)",
+    `$s.TargetPath='${q(exe)}'`,
+    `$s.WorkingDirectory='${q(workDir)}'`,
+    `$s.IconLocation='${q(exe)},0'`,
+    "$s.Description='CodeStatus 电脑端监控'",
+    "$s.Save()"
+  ].join(";");
+  const encoded = Buffer.from(ps, "utf16le").toString("base64");
+  execFile(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+    { windowsHide: true, timeout: 8000 },
+    (err) => {
+      if (err) console.log(`[快捷方式] 创建跳过/失败：${err.message || err.code}`);
+    }
+  );
 }
 
 bootstrap();
